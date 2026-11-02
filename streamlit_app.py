@@ -1,6 +1,6 @@
 """
 ⚡ CLAUDE CLUSTER CONSOLE — ULTRA-COMPACT EDITION
-Modular Entry Point • Official Anthropic API Powered
+Modular Entry Point • Official Anthropic API • Stateful Loop 'Lanjut'
 """
 
 import streamlit as st
@@ -59,22 +59,38 @@ with col_ctrl:
     
     with tabs[0]:
         st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
+        
+        # Pilihan Model & Reset Thread
+        c_mod, c_rst = st.columns([3, 1])
+        with c_mod:
+            selected_model = st.selectbox(
+                "Model",
+                options=["claude-3-5-sonnet-20241022", "claude-3-haiku-20240307"],
+                format_func=lambda x: "⚡ Sonnet 3.5 (Pintar)" if "sonnet" in x else "🪶 Haiku 3 (Hemat Saldo)",
+                label_visibility="collapsed"
+            )
+        with c_rst:
+            if st.button("🗑️ Reset Chat", help="Bersihkan memori percakapan loop", use_container_width=True):
+                with GSTATE.lock:
+                    GSTATE.active_chat_thread = []
+                st.toast("Memori chat direset!")
+
         prompt_val = st.text_input("Payload / Command", value="lanjut", label_visibility="collapsed", placeholder="Type instruction or 'lanjut'...")
         
         b1, b2, b3 = st.columns([3, 3, 2])
         with b1:
             if st.button("⚡ Run Once", type="primary", disabled=GSTATE.task_running or GSTATE.auto_running, use_container_width=True):
                 if prompt_val.strip():
-                    t = threading.Thread(target=run_single_task, args=(GSTATE, pool, prompt_val), daemon=True)
+                    t = threading.Thread(target=run_single_task, args=(GSTATE, pool, prompt_val, selected_model), daemon=True)
                     t.start()
                     st.rerun()
         with b2:
             if not GSTATE.auto_running:
-                if st.button("▶ Start 24/7", disabled=GSTATE.task_running, use_container_width=True):
+                if st.button("▶ Start Loop", disabled=GSTATE.task_running, use_container_width=True):
                     GSTATE.auto_stop_event.clear()
                     GSTATE.auto_running = True
                     GSTATE.auto_iteration = 0
-                    t = threading.Thread(target=run_auto_daemon, args=(GSTATE, pool, 100, prompt_val, True), daemon=True)
+                    t = threading.Thread(target=run_auto_daemon, args=(GSTATE, pool, 100, prompt_val, True, selected_model), daemon=True)
                     t.start()
                     st.rerun()
             else:
