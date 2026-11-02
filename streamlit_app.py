@@ -1,6 +1,6 @@
 """
 ⚡ CLAUDE CLUSTER CONSOLE — ULTRA-COMPACT EDITION
-Modular Entry Point
+Modular Entry Point • Mobile Optimized & History Feed
 """
 
 import streamlit as st
@@ -17,7 +17,12 @@ from src.worker import GlobalWorkerState, run_single_task, run_auto_daemon
 from src.client import ClaudeWebClient
 from ui.styles import inject_styles
 from ui.auth import require_auth
-from ui.components import render_telemetry_header, render_node_cards, render_terminal_stream
+from ui.components import (
+    render_telemetry_header,
+    render_node_cards,
+    render_terminal_stream,
+    render_history_feed
+)
 
 # Page Config
 st.set_page_config(
@@ -27,7 +32,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Injeksi CSS
+# Injeksi CSS Mobile & Desktop
 inject_styles()
 
 # Gatekeeper Password Auth
@@ -36,7 +41,7 @@ if not require_auth():
 
 # State & Pool Init
 if "global_state" not in st.session_state:
-    st.session_state.global_state = GlobalWorkerState()
+    st.session_state.global_state = GlobalWorkerState(BASE_DIR)
 
 GSTATE = st.session_state.global_state
 pool = ClusterPool(BASE_DIR)
@@ -46,11 +51,11 @@ summary = pool.get_status_summary()
 render_telemetry_header(summary, GSTATE.auto_running, GSTATE.auto_iteration)
 render_node_cards(summary)
 
-# Main Split-Screen Layout
+# Main Split-Screen Layout (Auto-stacks vertically on Mobile)
 col_ctrl, col_term = st.columns([5, 7])
 
 with col_ctrl:
-    tabs = st.tabs(["🚀 CONTROLLER", "🔑 VAULT (KEYS)", "⚙️ CONFIG"])
+    tabs = st.tabs(["🚀 CONTROLLER", "📜 FEED (HISTORY)", "🔑 VAULT", "⚙️ CONFIG"])
     
     with tabs[0]:
         st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
@@ -65,7 +70,7 @@ with col_ctrl:
                     st.rerun()
         with b2:
             if not GSTATE.auto_running:
-                if st.button("▶ Start 24/7 Loop", disabled=GSTATE.task_running, use_container_width=True):
+                if st.button("▶ Start 24/7", disabled=GSTATE.task_running, use_container_width=True):
                     GSTATE.auto_stop_event.clear()
                     GSTATE.auto_running = True
                     GSTATE.auto_iteration = 0
@@ -86,10 +91,14 @@ with col_ctrl:
 
         if GSTATE.task_result:
             st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-            with st.expander(f"📄 Response ({GSTATE.task_account})", expanded=True):
+            with st.expander(f"📄 Latest Response ({GSTATE.task_account})", expanded=True):
                 st.markdown(GSTATE.task_result)
 
     with tabs[1]:
+        # Riwayat lengkap command sent & response received dari semua akun
+        render_history_feed(GSTATE.invocations)
+
+    with tabs[2]:
         st.caption("Inspect `claude.ai` -> F12 -> Cookies -> `sessionKey`")
         v_updated = False
         for acc in pool.config.get("accounts", []):
@@ -112,7 +121,7 @@ with col_ctrl:
             st.success("Keys saved!")
             st.rerun()
 
-    with tabs[2]:
+    with tabs[3]:
         cd_h = st.number_input("Cooldown (Hours)", 1.0, 12.0, float(pool.config.get("cooldown_hours", 5.0)), 0.5)
         if st.button("Save Config", use_container_width=True):
             pool.config["cooldown_hours"] = cd_h
