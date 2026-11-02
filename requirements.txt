@@ -1,2 +1,5 @@
 streamlit>=1.40.0
+requests>=2.31.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
 playwright>=1.48.0
