@@ -1,6 +1,6 @@
 """
 Direct HTTP Client untuk Claude.ai internal API menggunakan curl_cffi.
-Mendukung sessionKey + cf_clearance untuk tembus Cloudflare WAF.
+Mendukung sessionKey (sid01 & sid02) + cf_clearance Cloudflare bypass.
 """
 
 import json
@@ -41,7 +41,8 @@ class ClaudeWebClient:
             if m_cf:
                 self.cf_clearance = m_cf.group(1).strip()
 
-        self.session.headers.update({
+        # Headers standar Chrome Windows
+        self.session.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "application/json, text/event-stream, text/plain, */*",
             "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
@@ -53,11 +54,17 @@ class ClaudeWebClient:
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
-        })
+        }
 
-        self.session.cookies.set("sessionKey", self.session_key, domain="claude.ai")
+        # Set cookies ke root domain .claude.ai & claude.ai
+        cookie_parts = [f"sessionKey={self.session_key}"]
         if self.cf_clearance:
-            self.session.cookies.set("cf_clearance", self.cf_clearance, domain="claude.ai")
+            cookie_parts.append(f"cf_clearance={self.cf_clearance}")
+        self.session.headers["Cookie"] = "; ".join(cookie_parts)
+
+        self.session.cookies.set("sessionKey", self.session_key, domain=".claude.ai")
+        if self.cf_clearance:
+            self.session.cookies.set("cf_clearance", self.cf_clearance, domain=".claude.ai")
 
         self.org_id: Optional[str] = None
 
@@ -74,7 +81,7 @@ class ClaudeWebClient:
                 return True, "OK"
             elif resp.status_code == 403:
                 if "<title>Just a moment...</title>" in resp.text or "challenge" in resp.text.lower():
-                    return False, "Cloudflare 403 (Perlu cf_clearance)"
+                    return False, "Cloudflare 403 (Challenge Aktif)"
                 return False, f"HTTP 403 Forbidden"
             elif resp.status_code == 401:
                 return False, "HTTP 401 (Key Hangus/Salah)"
