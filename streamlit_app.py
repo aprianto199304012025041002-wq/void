@@ -107,8 +107,10 @@ with col_ctrl:
                 n_key = st.text_input(f"Key N0{acc['id']}", value=acc.get("session_key", ""), type="password", key=f"k_{acc['id']}", label_visibility="collapsed")
             with c_p:
                 if st.button("🔍 Ping", key=f"p_{acc['id']}", use_container_width=True):
-                    if n_key.strip():
-                        test_cli = ClaudeWebClient(n_key.strip())
+                    key_to_test = n_key.strip() if n_key.strip() else acc.get("session_key", "")
+                    cf_to_test = acc.get("cf_clearance", "")
+                    if key_to_test:
+                        test_cli = ClaudeWebClient(key_to_test, cf_clearance=cf_to_test)
                         ok, msg = test_cli.test_connection()
                         if ok:
                             st.success(f"✔ {msg}")
