@@ -1,5 +1,5 @@
 """
-Cyberpunk Ultra-Compact High-Density CSS
+Cyberpunk Ultra-Compact High-Density CSS with Mobile Portrait Optimization.
 """
 
 import streamlit as st
@@ -11,7 +11,7 @@ def inject_styles():
     <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 
     <style>
-    /* Streamlit Cloud top bar fix so content is NEVER cut off */
+    /* Streamlit Cloud top bar fix */
     header[data-testid="stHeader"] {
         background: transparent !important;
         height: 2.8rem !important;
@@ -36,7 +36,7 @@ def inject_styles():
         background-color: #06090E;
     }
 
-    /* Compact Top Header Bar */
+    /* Top Telemetry Header */
     .compact-header {
         display: flex;
         justify-content: space-between;
@@ -50,7 +50,7 @@ def inject_styles():
     .compact-header .title-badge {
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 8px;
         font-family: 'Fira Code', monospace;
         font-size: 0.85rem;
         font-weight: 700;
@@ -58,7 +58,7 @@ def inject_styles():
     }
     .compact-header .stats-inline {
         display: flex;
-        gap: 16px;
+        gap: 14px;
         font-family: 'Fira Code', monospace;
         font-size: 0.75rem;
         color: #94A3B8;
@@ -100,7 +100,7 @@ def inject_styles():
         background: #04060A;
         border: 1px solid rgba(255, 255, 255, 0.08);
         border-radius: 8px;
-        height: 510px;
+        height: 520px;
         display: flex;
         flex-direction: column;
         overflow: hidden;
@@ -135,14 +135,75 @@ def inject_styles():
 
     /* Auth Gate Card */
     .auth-box {
-        max-width: 400px;
-        margin: 80px auto;
+        max-width: 380px;
+        margin: 60px auto;
         background: #0B111A;
         border: 1px solid rgba(255, 255, 255, 0.1);
         border-radius: 12px;
-        padding: 28px;
+        padding: 24px;
         text-align: center;
         box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8);
+    }
+
+    /* History Feed Card */
+    .history-card {
+        background: #0B111A;
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-radius: 8px;
+        padding: 10px 12px;
+        margin-bottom: 8px;
+    }
+    .history-meta {
+        display: flex;
+        justify-content: space-between;
+        font-family: 'Fira Code', monospace;
+        font-size: 0.7rem;
+        color: #64748B;
+        margin-bottom: 4px;
+    }
+
+    /* ══════════════════════════════════════════════════════════════════
+       📱 MOBILE PORTRAIT RESPONSIVE BREAKPOINTS (<= 768px)
+       ══════════════════════════════════════════════════════════════════ */
+    @media only screen and (max-width: 768px) {
+        .block-container {
+            padding-top: 2.8rem !important;
+            padding-left: 0.5rem !important;
+            padding-right: 0.5rem !important;
+            padding-bottom: 0.8rem !important;
+        }
+        
+        .compact-header {
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 6px;
+            padding: 8px 10px;
+        }
+        .compact-header .stats-inline {
+            flex-wrap: wrap;
+            gap: 8px 12px;
+            font-size: 0.7rem;
+        }
+        
+        .term-box {
+            height: 320px !important;
+            margin-top: 10px;
+        }
+        .term-body {
+            font-size: 0.7rem;
+            padding: 8px 10px;
+        }
+
+        /* Touch-friendly buttons for mobile */
+        .stButton button {
+            min-height: 40px !important;
+            font-size: 0.85rem !important;
+        }
+
+        .auth-box {
+            margin: 30px auto;
+            padding: 16px;
+        }
     }
     </style>
     """, unsafe_allow_html=True)
