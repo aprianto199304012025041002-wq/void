@@ -1,6 +1,6 @@
 """
 Direct HTTP Client untuk Claude.ai internal API menggunakan curl_cffi.
-Mendukung logging diagnosa detail saat ping/koneksi.
+Mendukung sessionKey + cf_clearance untuk tembus Cloudflare WAF.
 """
 
 import json
@@ -23,7 +23,7 @@ class ClaudeAuthError(Exception):
 class ClaudeWebClient:
     BASE_URL = "https://claude.ai"
 
-    def __init__(self, raw_cookie_or_key: str):
+    def __init__(self, raw_cookie_or_key: str, cf_clearance: Optional[str] = None):
         self.raw_input = raw_cookie_or_key.strip()
         self.session = requests.Session(impersonate="chrome124")
         
@@ -34,9 +34,9 @@ class ClaudeWebClient:
             if m:
                 self.session_key = m.group(1).strip()
 
-        # Ekstrak cf_clearance jika user memasukkan seluruh cookie string
-        self.cf_clearance = None
-        if "cf_clearance=" in self.raw_input:
+        # Ekstrak cf_clearance
+        self.cf_clearance = cf_clearance.strip() if cf_clearance else None
+        if not self.cf_clearance and "cf_clearance=" in self.raw_input:
             m_cf = re.search(r"cf_clearance=([^;]+)", self.raw_input)
             if m_cf:
                 self.cf_clearance = m_cf.group(1).strip()
@@ -74,7 +74,7 @@ class ClaudeWebClient:
                 return True, "OK"
             elif resp.status_code == 403:
                 if "<title>Just a moment...</title>" in resp.text or "challenge" in resp.text.lower():
-                    return False, "Cloudflare 403 Challenge"
+                    return False, "Cloudflare 403 (Perlu cf_clearance)"
                 return False, f"HTTP 403 Forbidden"
             elif resp.status_code == 401:
                 return False, "HTTP 401 (Key Hangus/Salah)"
@@ -95,7 +95,7 @@ class ClaudeWebClient:
 
         if resp.status_code in [401, 403]:
             if "<title>Just a moment...</title>" in resp.text or "challenge" in resp.text.lower():
-                raise ClaudeAuthError(f"Cloudflare 403 terpicu.")
+                raise ClaudeAuthError(f"Cloudflare 403 terpicu (Butuh cf_clearance valid).")
             raise ClaudeAuthError(f"sessionKey tidak valid / kedaluwarsa (HTTP {resp.status_code}).")
 
         if resp.status_code != 200:
