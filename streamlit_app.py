@@ -51,7 +51,7 @@ GSTATE = st.session_state.global_state
 acc_mgr = AccountManager(BASE_DIR)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# ULTRA-COMPACT HIGH-DENSITY CSS
+# ULTRA-COMPACT HIGH-DENSITY CSS (WITH CLOUD HEADER FIX)
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="CLAUDE CONSOLE",
@@ -66,9 +66,13 @@ st.markdown("""
 <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 
 <style>
-/* Reset padding & margin for maximum screen real estate */
+/* Streamlit Cloud top bar fix so content is NEVER cut off */
+header[data-testid="stHeader"] {
+    background: transparent !important;
+    height: 2.8rem !important;
+}
 .block-container {
-    padding-top: 1rem !important;
+    padding-top: 3.2rem !important;
     padding-bottom: 1rem !important;
     padding-left: 1.5rem !important;
     padding-right: 1.5rem !important;
@@ -151,7 +155,7 @@ code, pre, .mono {
     background: #04060A;
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 8px;
-    height: 520px;
+    height: 510px;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -183,14 +187,6 @@ code, pre, .mono {
 .c-warn { color: #FBBF24; font-weight: 600; }
 .c-err  { color: #F87171; font-weight: 600; }
 .c-loop { color: #818CF8; font-weight: 600; }
-
-/* Tight Controls container */
-.ctrl-panel {
-    background: #0B111A;
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: 8px;
-    padding: 12px 14px;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -395,10 +391,8 @@ with col_left:
     
     with tabs[0]:
         st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
-        # Fast input
         prompt_val = st.text_input("Payload / Command", value="lanjut", label_visibility="collapsed", placeholder="Type instruction or 'lanjut'...")
         
-        # Action Bar
         b_c1, b_c2, b_c3 = st.columns([3, 3, 2])
         with b_c1:
             if st.button("⚡ Run Once", type="primary", disabled=GSTATE.task_running or GSTATE.auto_running, use_container_width=True):
@@ -427,7 +421,6 @@ with col_left:
         if GSTATE.auto_running and GSTATE.sleeping_until_str:
             st.info(f"🛌 **Cluster Sleeping**: Resuming automatically at **{GSTATE.sleeping_until_str}**")
 
-        # Result box if single task finished
         if GSTATE.task_result:
             st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
             with st.expander(f"📄 Response ({GSTATE.task_account})", expanded=True):
@@ -472,7 +465,6 @@ with col_left:
             st.rerun()
 
 with col_right:
-    # High-density Terminal Console
     rows_html = []
     for ts, tag, msg in GSTATE.task_logs[-60:]:
         tag_cls = {
@@ -500,7 +492,6 @@ with col_right:
     </div>
     """, unsafe_allow_html=True)
 
-# Auto-refresh loop for terminal stream
 if GSTATE.auto_running or GSTATE.task_running:
     time.sleep(3)
     st.rerun()
