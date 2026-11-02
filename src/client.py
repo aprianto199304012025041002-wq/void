@@ -1,9 +1,9 @@
 """
-Official Anthropic API Client for Cloud-Native Execution.
-100% Bebas Cloudflare WAF • Resmi Didukung di Streamlit Cloud.
+Official Anthropic API Client with Stateful Conversation Memory.
+Mendukung looping 'lanjut' dengan konteks percakapan bersambung.
 """
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict
 import requests
 
 class ClaudeAPIError(Exception):
@@ -20,8 +20,9 @@ class ClaudeAuthError(Exception):
 class ClaudeWebClient:
     API_URL = "https://api.anthropic.com/v1/messages"
 
-    def __init__(self, api_key: str, **kwargs):
+    def __init__(self, api_key: str, model: str = "claude-3-5-sonnet-20241022"):
         self.api_key = api_key.strip()
+        self.model = model
         self.headers = {
             "x-api-key": self.api_key,
             "anthropic-version": "2023-06-01",
@@ -29,7 +30,6 @@ class ClaudeWebClient:
         }
 
     def test_connection(self) -> Tuple[bool, str]:
-        """Tes validitas API Key dengan request minimal."""
         payload = {
             "model": "claude-3-haiku-20240307",
             "max_tokens": 5,
@@ -40,7 +40,7 @@ class ClaudeWebClient:
             if resp.status_code == 200:
                 return True, "API Key Valid & Terhubung"
             elif resp.status_code == 401:
-                return False, "HTTP 401 (API Key Salah / Tidak Valid)"
+                return False, "HTTP 401 (API Key Salah)"
             elif resp.status_code == 429:
                 return False, "HTTP 429 (Rate Limit / Saldo Habis)"
             else:
@@ -49,27 +49,32 @@ class ClaudeWebClient:
         except Exception as e:
             return False, f"Network Err: {str(e)[:40]}"
 
-    def send_message(self, prompt: str, conversation_uuid: Optional[str] = None) -> str:
-        """Mengirim prompt ke model Claude resmi."""
-        # Menggunakan model Claude 3.5 Sonnet terbaru, atau fallback ke Haiku jika hemat token
+    def send_conversation(self, messages: List[Dict[str, str]], system_prompt: Optional[str] = None) -> str:
+        """
+        Mengirim percakapan multi-turn lengkap (user & assistant)
+        sehingga Claude bisa merespons 'lanjut' secara bersambung!
+        """
+        # Batasi riwayat maksimal 10 pertukaran terakhir agar tidak over-token
+        trimmed_messages = messages[-10:] if len(messages) > 10 else messages
+
         payload = {
-            "model": "claude-3-5-sonnet-20241022",
+            "model": self.model,
             "max_tokens": 4096,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ]
+            "messages": trimmed_messages
         }
+        if system_prompt:
+            payload["system"] = system_prompt
 
         try:
             resp = requests.post(self.API_URL, headers=self.headers, json=payload, timeout=180)
         except Exception as e:
-            raise ClaudeAPIError(f"Gagal mengirim request ke Anthropic: {e}")
+            raise ClaudeAPIError(f"Request gagal: {e}")
 
         if resp.status_code == 401:
-            raise ClaudeAuthError("API Key tidak valid atau dinonaktifkan.")
+            raise ClaudeAuthError("API Key tidak valid.")
 
         if resp.status_code == 429:
-            raise ClaudeRateLimitError("Rate limit / kuota token tercapai pada API Key ini.", reset_seconds=3600)
+            raise ClaudeRateLimitError("Rate limit / saldo habis pada key ini.", reset_seconds=3600)
 
         if resp.status_code != 200:
             err_detail = ""
@@ -85,4 +90,4 @@ class ClaudeWebClient:
             full_text = "".join(b.get("text", "") for b in content_blocks if b.get("type") == "text")
             return full_text.strip()
         except Exception as e:
-            raise ClaudeAPIError(f"Gagal memproses jawaban dari Anthropic: {e}")
+            raise ClaudeAPIError(f"Gagal memproses data jawaban: {e}")
