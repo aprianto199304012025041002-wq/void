@@ -1,7 +1,7 @@
 """
 Claude Multi-Account Orchestrator — Cloud-Native Edition
 100% Berjalan di Streamlit Cloud tanpa memerlukan PC Backend / Browser Automation.
-Audited & Thread-Safe.
+Mendukung INFINITE MODE (Non-Stop 24/7) dengan Smart Cooldown Sleep & Auto-Wakeup.
 """
 
 import streamlit as st
@@ -20,7 +20,7 @@ from account_manager import AccountManager
 from claude_api_client import ClaudeWebClient, ClaudeRateLimitError, ClaudeAuthError, ClaudeAPIError
 
 # ──────────────────────────────────────────────────────────────────────────────
-# GLOBAL THREAD-SAFE STATE (Menghindari Streamlit NoSessionContext Bug)
+# GLOBAL THREAD-SAFE STATE
 # ──────────────────────────────────────────────────────────────────────────────
 class GlobalWorkerState:
     def __init__(self):
@@ -35,6 +35,8 @@ class GlobalWorkerState:
         self.auto_logs = []
         self.auto_iteration = 0
         self.auto_max = 100
+        self.infinite_mode = False
+        self.sleeping_until_str = ""
         self.auto_stop_event = threading.Event()
 
     def log_task(self, text: str):
@@ -72,7 +74,7 @@ st.markdown("""
     font-family: 'Consolas', 'Courier New', monospace;
     font-size: 13px;
     line-height: 1.6;
-    max-height: 420px;
+    max-height: 450px;
     overflow-y: auto;
     white-space: pre-wrap;
     word-break: break-word;
@@ -81,12 +83,13 @@ st.markdown("""
 .badge-ready  { color: #22c55e; font-weight: 700; font-size: 14px; }
 .badge-limit  { color: #ef4444; font-weight: 700; font-size: 14px; }
 .badge-nokey  { color: #eab308; font-weight: 700; font-size: 14px; }
+.badge-sleep  { color: #38bdf8; font-weight: 700; font-size: 14px; }
 </style>
 """, unsafe_allow_html=True)
 
 acc_mgr = AccountManager(BASE_DIR)
 
-def render_log(log_list: list, max_lines: int = 100):
+def render_log(log_list: list, max_lines: int = 120):
     text = "\n".join(log_list[-max_lines:]) if log_list else "Belum ada log aktif..."
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     st.markdown(f'<div class="log-terminal">{text}</div>', unsafe_allow_html=True)
@@ -144,51 +147,98 @@ def _thread_single_task(prompt_text: str):
 
     GSTATE.task_running = False
 
-def _thread_auto_runner(max_iter: int, prompt_text: str):
-    GSTATE.log_auto(f"🔄 Auto-Runner aktif. Target: {max_iter} iterasi | Prompt: '{prompt_text}'")
+def _thread_auto_runner(max_iter: int, prompt_text: str, infinite: bool):
+    mode_str = "♾️ INFINITE (Non-Stop 24/7)" if infinite else f"Target: {max_iter} iterasi"
+    GSTATE.log_auto(f"🔄 Auto-Runner aktif. Mode: {mode_str} | Prompt: '{prompt_text}'")
+    GSTATE.infinite_mode = infinite
     
-    for i in range(1, max_iter + 1):
+    i = 0
+    while True:
         if GSTATE.auto_stop_event.is_set():
-            GSTATE.log_auto("⏹️ Auto-runner dihentikan pengguna.")
+            GSTATE.log_auto("⏹️ Auto-runner dihentikan oleh pengguna.")
+            break
+
+        i += 1
+        if not infinite and i > max_iter:
+            GSTATE.log_auto(f"🏁 Target {max_iter} iterasi tercapai.")
             break
 
         GSTATE.auto_iteration = i
-        GSTATE.log_auto(f"\n>>> Iterasi #{i} / {max_iter}")
+        iter_display = f"#{i}" if infinite else f"#{i} / {max_iter}"
+        GSTATE.log_auto(f"\n>>> Iterasi {iter_display} ({datetime.now().strftime('%H:%M:%S')})")
 
+        # Cari akun yang ready
         account = acc_mgr.get_available_account()
+
         if not account:
-            GSTATE.log_auto("💤 Semua akun cooldown. Istirahat 60 detik sebelum periksa kembali...")
-            for _ in range(60):
+            # SEMUA AKUN SEDANG COOLDOWN - Hitung waktu tidur otomatis
+            now = time.time()
+            cooldown_list = []
+            for a_id, a_data in acc_mgr.state.get("accounts", {}).items():
+                avail_at = a_data.get("available_at", 0)
+                if avail_at > now:
+                    cooldown_list.append((avail_at - now, a_data.get("name", f"Akun {a_id}")))
+
+            if cooldown_list:
+                cooldown_list.sort(key=lambda x: x[0])
+                shortest_wait, next_acc_name = cooldown_list[0]
+                wait_min = max(1, int(shortest_wait // 60))
+                wake_time_str = (datetime.now() + timedelta(seconds=shortest_wait)).strftime("%H:%M:%S")
+                GSTATE.sleeping_until_str = wake_time_str
+                
+                GSTATE.log_auto(f"💤 SEMUA AKUN COOLDOWN! Akun tercepat: {next_acc_name} siap dalam ~{wait_min} menit (pukul {wake_time_str}).")
+                GSTATE.log_auto(f"🛌 Sistem istirahat otomatis sampai {wake_time_str}. Auto-wake akan berlanjut sendiri...")
+                
+                # Sleep dengan interval 10 detik agar tombol Stop tetap responsif
+                sleep_deadline = time.time() + shortest_wait
+                while time.time() < sleep_deadline:
+                    if GSTATE.auto_stop_event.is_set():
+                        break
+                    time.sleep(10)
+                
                 if GSTATE.auto_stop_event.is_set():
                     break
-                time.sleep(1)
-            continue
+                
+                GSTATE.sleeping_until_str = ""
+                GSTATE.log_auto(f"⏰ WAKTU TIBA! Bangun otomatis, memeriksa akun kembali...")
+                acc_mgr.refresh_statuses()
+                continue
+            else:
+                GSTATE.log_auto("⚠️ Tidak ada akun yang memiliki sessionKey valid.")
+                break
 
-        GSTATE.log_auto(f"Kirim instruksi ke {account['name']}...")
+        # Kirim prompt
+        GSTATE.log_auto(f"Mengirim '{prompt_text}' ke {account['name']}...")
         client = ClaudeWebClient(account["session_key"])
         chat_url = account.get("tapir_chat_url", "")
 
         try:
             resp = client.send_message(prompt_text, conversation_uuid=chat_url)
             acc_mgr.record_task_success(account["id"])
-            GSTATE.log_auto(f"✅ Selesai [{account['name']}] - {len(resp):,} karakter")
+            GSTATE.log_auto(f"✅ Selesai [{account['name']}] - {len(resp):,} karakter diterima.")
 
             resp_lower = resp.lower()
             if any(sig in resp_lower for sig in ["seluruh audit selesai", "pekerjaan sudah selesai", "tidak ada lagi"]):
-                GSTATE.log_auto("🎉 Claude menandakan bahwa seluruh pekerjaan SELESAI!")
+                GSTATE.log_auto("🎉 Claude menandakan bahwa seluruh tugas SELESAI TOTAL!")
                 break
 
         except ClaudeRateLimitError as e:
-            GSTATE.log_auto(f"⏳ Rate limit [{account['name']}]. Beralih ke akun berikutnya...")
+            GSTATE.log_auto(f"⏳ Rate limit pada {account['name']} ({e}). Auto-failover ke akun berikutnya...")
             acc_mgr.mark_rate_limited(account["id"], reset_seconds=e.reset_seconds)
+            # Ulangi iterasi yang sama untuk akun berikutnya
+            i -= 1
+            time.sleep(1)
+            continue
         except Exception as e:
-            GSTATE.log_auto(f"❌ Error [{account['name']}]: {e}")
+            GSTATE.log_auto(f"❌ Terjadi kesalahan pada {account['name']}: {e}")
 
+        # Jeda antar iterasi agar tidak spam
         if not GSTATE.auto_stop_event.is_set():
             time.sleep(5)
 
-    GSTATE.log_auto("🏁 Auto-runner selesai.")
+    GSTATE.log_auto("🏁 Auto-runner selesai / non-aktif.")
     GSTATE.auto_running = False
+    GSTATE.sleeping_until_str = ""
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SIDEBAR
@@ -210,7 +260,11 @@ with st.sidebar:
     st.write(f"Akun Siap: **{ready_count} / {len(summary)}**")
     
     if GSTATE.auto_running:
-        st.warning(f"🔄 Auto-Runner Aktif (#{GSTATE.auto_iteration})")
+        if GSTATE.sleeping_until_str:
+            st.info(f"🛌 Sedang Tidur Cooldown (Bangun: {GSTATE.sleeping_until_str})")
+        else:
+            mode_tag = "♾️ Infinite" if GSTATE.infinite_mode else f"#{GSTATE.auto_iteration}"
+            st.warning(f"🔄 Auto-Runner Aktif ({mode_tag})")
     elif GSTATE.task_running:
         st.info("⏳ Single task sedang berjalan...")
     
@@ -222,7 +276,7 @@ with st.sidebar:
 # ══════════════════════════════════════════════════════════════════════════════
 if page == "📊 Dashboard":
     st.title("📊 Status Pool Akun Claude (Cloud)")
-    st.caption("Auto-failover antar 4 akun tanpa server lokal")
+    st.caption("Auto-failover & Auto-loop 4 Akun Non-Stop")
 
     summary = acc_mgr.get_status_summary()
     ready_n = sum(1 for s in summary if s["status"] == "READY")
@@ -235,6 +289,13 @@ if page == "📊 Dashboard":
     c2.metric("🔴 Cooldown 5 Jam", limit_n)
     c3.metric("⚠️ Belum Diisi Key", nokey_n)
     c4.metric("📨 Total Selesai", total_t)
+
+    if GSTATE.auto_running:
+        if GSTATE.sleeping_until_str:
+            st.info(f"🛌 **Auto-Runner sedang tidur menunggu cooldown akun**. Otomatis bangun dan melanjutkan loop pada pukul **{GSTATE.sleeping_until_str}**.")
+        else:
+            mode_label = "Mode Infinite 24/7" if GSTATE.infinite_mode else f"Iterasi #{GSTATE.auto_iteration}"
+            st.success(f"🔄 **Auto-Runner Aktif**: {mode_label} sedang berjalan di background.")
 
     st.divider()
 
@@ -252,10 +313,7 @@ if page == "📊 Dashboard":
                 else:
                     st.markdown('<span class="badge-nokey">⚠️ BELUM ADA KEY</span>', unsafe_allow_html=True)
                     st.caption("Isi di menu Setup Akun")
-                st.caption(f"Tasks: {s['total_tasks']}")
-
-    if nokey_n > 0:
-        st.info("💡 Beberapa akun belum memiliki sessionKey. Buka menu **🔑 Setup Akun (Cookies)** di sidebar untuk memasukkannya.")
+                st.caption(f"Tasks Selesai: {s['total_tasks']}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: JALANKAN TASK
@@ -295,38 +353,45 @@ elif page == "🚀 Jalankan Task":
 # PAGE: AUTO RUNNER
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "🔄 Auto Runner":
-    st.title("🔄 Auto Runner")
-    st.info("Auto Runner mengirim perintah berulang kali (misal: 'lanjut') dan otomatis memutar akun jika limit 5 jam tercapai.")
+    st.title("🔄 Auto Runner (Infinite & Auto Cooldown)")
+    st.info("Sistem akan looping mengirim pesan, otomatis failover antar akun saat limit 5 jam tiba, dan otomatis tidur lalu bangun sendiri jika semua akun sedang cooldown.")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        max_i = st.number_input("Maksimum Iterasi", 1, 500, 100, disabled=GSTATE.auto_running)
-    with c2:
-        prompt_auto = st.text_input("Prompt Tiap Langkah", value="lanjut", disabled=GSTATE.auto_running)
+    with st.container(border=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            infinite_check = st.checkbox("♾️ **Infinite Mode (Non-Stop 24/7 Tanpa Batas Iterasi)**", value=True, disabled=GSTATE.auto_running)
+            max_i = st.number_input("Maksimum Iterasi (jika Infinite tidak dicentang)", 1, 5000, 100, disabled=GSTATE.auto_running or infinite_check)
+        with c2:
+            prompt_auto = st.text_input("Prompt Tiap Iterasi", value="lanjut", disabled=GSTATE.auto_running)
 
-    b1, b2 = st.columns(2)
-    with b1:
-        if st.button("▶️ Mulai Auto-Runner", type="primary", disabled=GSTATE.auto_running, use_container_width=True):
-            GSTATE.auto_stop_event.clear()
-            GSTATE.auto_running = True
-            GSTATE.auto_logs = []
-            GSTATE.auto_iteration = 0
-            GSTATE.auto_max = max_i
-            t = threading.Thread(target=_thread_auto_runner, args=(max_i, prompt_auto), daemon=True)
-            t.start()
-            st.rerun()
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("▶️ Mulai Auto-Loop", type="primary", disabled=GSTATE.auto_running, use_container_width=True):
+                GSTATE.auto_stop_event.clear()
+                GSTATE.auto_running = True
+                GSTATE.auto_logs = []
+                GSTATE.auto_iteration = 0
+                GSTATE.auto_max = max_i
+                t = threading.Thread(target=_thread_auto_runner, args=(max_i, prompt_auto, infinite_check), daemon=True)
+                t.start()
+                st.rerun()
 
-    with b2:
-        if st.button("⏹️ Hentikan", disabled=not GSTATE.auto_running, use_container_width=True):
-            GSTATE.auto_stop_event.set()
-            GSTATE.auto_running = False
-            st.warning("Mengirim sinyal berhenti...")
-            st.rerun()
+        with b2:
+            if st.button("⏹️ Hentikan Loop", disabled=not GSTATE.auto_running, use_container_width=True):
+                GSTATE.auto_stop_event.set()
+                GSTATE.auto_running = False
+                st.warning("Sinyal berhenti terkirim. Runner akan berhenti setelah aksi saat ini...")
+                st.rerun()
 
     if GSTATE.auto_running or GSTATE.auto_logs:
-        if GSTATE.auto_max > 0:
-            st.progress(min(1.0, GSTATE.auto_iteration / GSTATE.auto_max), 
-                        text=f"Iterasi {GSTATE.auto_iteration} / {GSTATE.auto_max}")
+        if GSTATE.auto_running:
+            if GSTATE.sleeping_until_str:
+                st.markdown(f'<span class="badge-sleep">🛌 Sedang Tidur Cooldown. Otomatis bangun pukul: {GSTATE.sleeping_until_str}</span>', unsafe_allow_html=True)
+            elif GSTATE.infinite_mode:
+                st.caption(f"♾️ Mode Non-Stop Aktif | Total Iterasi Terkirim: **{GSTATE.auto_iteration}**")
+            elif GSTATE.auto_max > 0:
+                st.progress(min(1.0, GSTATE.auto_iteration / GSTATE.auto_max), 
+                            text=f"Iterasi {GSTATE.auto_iteration} / {GSTATE.auto_max}")
         render_log(GSTATE.auto_logs)
 
         if GSTATE.auto_running:
@@ -420,7 +485,7 @@ elif page == "⚙️ Pengaturan":
     st.title("⚙️ Pengaturan Pool")
     
     cd_hours = st.number_input(
-        "Cooldown Rate Limit (Jam)",
+        "Default Cooldown Rate Limit (Jam)",
         min_value=1.0,
         max_value=12.0,
         value=float(acc_mgr.config.get("cooldown_hours", 5.0)),
