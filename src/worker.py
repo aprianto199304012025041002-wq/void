@@ -1,6 +1,5 @@
 """
-Cluster Thread Workers & Global State Manager.
-Mengeksekusi task & menyimpan riwayat lengkap (Command Sent & Full Responses).
+Cluster Thread Workers & Global State Manager for Anthropic API.
 """
 
 import threading
@@ -85,16 +84,16 @@ def run_single_task(state: GlobalWorkerState, pool: ClusterPool, prompt_text: st
     while attempts < max_attempts:
         account = pool.get_available_account()
         if not account:
-            state.log("WARN", "Pool lock: Semua node dalam cooldown.")
-            state.task_error = "Semua akun dalam masa jeda 5 jam atau sessionKey kosong."
+            state.log("WARN", "Pool lock: Semua key dalam status cooldown / kosong.")
+            state.task_error = "Semua API key cooldown atau belum diisi."
             break
 
         state.log("INFO", f"Dispatch -> Node #{account['id']} [{account['name']}]")
-        client = ClaudeWebClient(account["session_key"], cf_clearance=account.get("cf_clearance"))
-        chat_url = account.get("tapir_chat_url", "")
+        key_val = account.get("api_key") or account.get("session_key")
+        client = ClaudeWebClient(key_val)
 
         try:
-            resp = client.send_message(prompt_text, conversation_uuid=chat_url)
+            resp = client.send_message(prompt_text)
             pool.record_task_success(account["id"])
             state.log("SUCCESS", f"Node #{account['id']} selesai ({len(resp):,} karakter).")
             state.task_result = resp
@@ -103,7 +102,7 @@ def run_single_task(state: GlobalWorkerState, pool: ClusterPool, prompt_text: st
             success = True
             break
         except ClaudeRateLimitError as e:
-            state.log("WARN", f"Node #{account['id']} limit 5 jam. Auto-failover...")
+            state.log("WARN", f"Node #{account['id']} limit. Auto-failover...")
             pool.mark_rate_limited(account["id"], reset_seconds=e.reset_seconds)
             attempts += 1
         except Exception as e:
@@ -111,7 +110,7 @@ def run_single_task(state: GlobalWorkerState, pool: ClusterPool, prompt_text: st
             attempts += 1
 
     if not success and not state.task_error:
-        state.task_error = "Eksekusi gagal di semua node."
+        state.task_error = "Eksekusi gagal di semua API Key."
     state.task_running = False
 
 def run_auto_daemon(state: GlobalWorkerState, pool: ClusterPool, max_iter: int, prompt_text: str, infinite: bool):
@@ -151,7 +150,7 @@ def run_auto_daemon(state: GlobalWorkerState, pool: ClusterPool, max_iter: int, 
                 wake_time = (datetime.now() + timedelta(seconds=shortest_wait)).strftime("%H:%M:%S")
                 state.sleeping_until_str = wake_time
 
-                state.log("WARN", f"SEMUA NODE COOLDOWN. {next_name} siap dalam ~{wait_min}m ({wake_time}). Tidur otomatis...")
+                state.log("WARN", f"SEMUA KEY COOLDOWN. {next_name} siap dalam ~{wait_min}m ({wake_time}). Tidur otomatis...")
 
                 sleep_deadline = time.time() + shortest_wait
                 while time.time() < sleep_deadline:
@@ -167,15 +166,15 @@ def run_auto_daemon(state: GlobalWorkerState, pool: ClusterPool, max_iter: int, 
                 pool.refresh_statuses()
                 continue
             else:
-                state.log("ERROR", "Tidak ada akun dengan sessionKey valid.")
+                state.log("ERROR", "Tidak ada API key valid.")
                 break
 
         state.log("INFO", f"Kirim -> Node #{account['id']} [{account['name']}]")
-        client = ClaudeWebClient(account["session_key"], cf_clearance=account.get("cf_clearance"))
-        chat_url = account.get("tapir_chat_url", "")
+        key_val = account.get("api_key") or account.get("session_key")
+        client = ClaudeWebClient(key_val)
 
         try:
-            resp = client.send_message(prompt_text, conversation_uuid=chat_url)
+            resp = client.send_message(prompt_text)
             pool.record_task_success(account["id"])
             state.log("SUCCESS", f"Node #{account['id']} menjawab ({len(resp):,} karakter).")
             state.record_invocation(account["id"], account["name"], prompt_text, resp, mode=f"AUTO #{i}")
@@ -185,7 +184,7 @@ def run_auto_daemon(state: GlobalWorkerState, pool: ClusterPool, max_iter: int, 
                 state.log("SUCCESS", "Pola tugas selesai terdeteksi. Selesai.")
                 break
         except ClaudeRateLimitError as e:
-            state.log("WARN", f"Node #{account['id']} 5h limit. Failover...")
+            state.log("WARN", f"Node #{account['id']} limit. Failover...")
             pool.mark_rate_limited(account["id"], reset_seconds=e.reset_seconds)
             i -= 1
             time.sleep(1)
