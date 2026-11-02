@@ -42,6 +42,8 @@ class ClusterPool:
                     if matched:
                         if s_acc.get("session_key"):
                             matched["session_key"] = s_acc["session_key"]
+                        if s_acc.get("cf_clearance"):
+                            matched["cf_clearance"] = s_acc["cf_clearance"]
                     else:
                         cfg["accounts"].append(dict(s_acc))
         except Exception:
