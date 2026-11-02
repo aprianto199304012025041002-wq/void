@@ -1,5 +1,6 @@
 """
-Cluster Thread Workers & Global State Manager for Anthropic API.
+Cluster Thread Workers & Global State Manager with Conversation Memory.
+Mendukung looping 'lanjut' bersambung dan multi-key failover.
 """
 
 import threading
@@ -33,7 +34,11 @@ class GlobalWorkerState:
         self.sleeping_until_str = ""
         self.auto_stop_event = threading.Event()
 
+        # Riwayat interaksi (prompt + respon)
         self.invocations: List[Dict[str, Any]] = self._load_history()
+
+        # Thread percakapan aktif untuk auto-runner (agar bisa loop 'lanjut')
+        self.active_chat_thread: List[Dict[str, str]] = []
 
     def _load_history(self) -> List[Dict[str, Any]]:
         if os.path.exists(self.history_path):
@@ -71,7 +76,7 @@ class GlobalWorkerState:
             self.invocations.insert(0, entry)
             self._save_history()
 
-def run_single_task(state: GlobalWorkerState, pool: ClusterPool, prompt_text: str):
+def run_single_task(state: GlobalWorkerState, pool: ClusterPool, prompt_text: str, model_name: str = "claude-3-5-sonnet-20241022"):
     state.task_running = True
     state.task_result = None
     state.task_error = None
@@ -84,20 +89,30 @@ def run_single_task(state: GlobalWorkerState, pool: ClusterPool, prompt_text: st
     while attempts < max_attempts:
         account = pool.get_available_account()
         if not account:
-            state.log("WARN", "Pool lock: Semua key dalam status cooldown / kosong.")
+            state.log("WARN", "Pool lock: Semua API Key dalam status cooldown / kosong.")
             state.task_error = "Semua API key cooldown atau belum diisi."
             break
 
-        state.log("INFO", f"Dispatch -> Node #{account['id']} [{account['name']}]")
+        state.log("INFO", f"Dispatch -> Node #{account['id']} [{account['name']}] ({model_name})")
         key_val = account.get("api_key") or account.get("session_key")
-        client = ClaudeWebClient(key_val)
+        client = ClaudeWebClient(key_val, model=model_name)
+
+        messages = [{"role": "user", "content": prompt_text}]
 
         try:
-            resp = client.send_message(prompt_text)
+            resp = client.send_conversation(messages)
             pool.record_task_success(account["id"])
             state.log("SUCCESS", f"Node #{account['id']} selesai ({len(resp):,} karakter).")
             state.task_result = resp
             state.task_account = account["name"]
+            
+            # Simpan percakapan ke thread agar jika user klik 'lanjut' bisa nyambung
+            with state.lock:
+                state.active_chat_thread = [
+                    {"role": "user", "content": prompt_text},
+                    {"role": "assistant", "content": resp}
+                ]
+
             state.record_invocation(account["id"], account["name"], prompt_text, resp, mode="MANUAL")
             success = True
             break
@@ -113,10 +128,15 @@ def run_single_task(state: GlobalWorkerState, pool: ClusterPool, prompt_text: st
         state.task_error = "Eksekusi gagal di semua API Key."
     state.task_running = False
 
-def run_auto_daemon(state: GlobalWorkerState, pool: ClusterPool, max_iter: int, prompt_text: str, infinite: bool):
+def run_auto_daemon(state: GlobalWorkerState, pool: ClusterPool, max_iter: int, prompt_text: str, infinite: bool, model_name: str = "claude-3-5-sonnet-20241022"):
     mode_tag = "INFINITE (24/7)" if infinite else f"{max_iter} ITER"
-    state.log("LOOP", f"Daemon aktif [{mode_tag}]. Payload: '{prompt_text}'")
+    state.log("LOOP", f"Daemon aktif [{mode_tag}] ({model_name}). Payload: '{prompt_text}'")
     state.infinite_mode = infinite
+
+    # Jika thread percakapan belum ada, mulai dari prompt awal
+    with state.lock:
+        if not state.active_chat_thread:
+            state.active_chat_thread = [{"role": "user", "content": prompt_text}]
 
     i = 0
     while True:
@@ -131,7 +151,7 @@ def run_auto_daemon(state: GlobalWorkerState, pool: ClusterPool, max_iter: int, 
 
         state.auto_iteration = i
         iter_display = f"#{i}" if infinite else f"#{i}/{max_iter}"
-        state.log("INFO", f"Siklus {iter_display} mulai...")
+        state.log("INFO", f"Siklus {iter_display} mulai (Konteks tersambung)...")
 
         account = pool.get_available_account()
 
@@ -171,18 +191,31 @@ def run_auto_daemon(state: GlobalWorkerState, pool: ClusterPool, max_iter: int, 
 
         state.log("INFO", f"Kirim -> Node #{account['id']} [{account['name']}]")
         key_val = account.get("api_key") or account.get("session_key")
-        client = ClaudeWebClient(key_val)
+        client = ClaudeWebClient(key_val, model=model_name)
+
+        # Siapkan payload percakapan
+        with state.lock:
+            # Jika iterasi > 1 dan pesan terakhir dari Claude, tambahkan instruksi 'lanjut'
+            if state.active_chat_thread and state.active_chat_thread[-1]["role"] == "assistant":
+                state.active_chat_thread.append({"role": "user", "content": prompt_text})
+            current_messages = list(state.active_chat_thread)
 
         try:
-            resp = client.send_message(prompt_text)
+            resp = client.send_conversation(current_messages)
             pool.record_task_success(account["id"])
             state.log("SUCCESS", f"Node #{account['id']} menjawab ({len(resp):,} karakter).")
+
+            with state.lock:
+                state.active_chat_thread.append({"role": "assistant", "content": resp})
+
             state.record_invocation(account["id"], account["name"], prompt_text, resp, mode=f"AUTO #{i}")
 
+            # Cek pola pekerjaan selesai
             resp_lower = resp.lower()
-            if any(sig in resp_lower for sig in ["seluruh audit selesai", "pekerjaan sudah selesai", "tidak ada lagi"]):
-                state.log("SUCCESS", "Pola tugas selesai terdeteksi. Selesai.")
+            if any(sig in resp_lower for sig in ["seluruh audit selesai", "pekerjaan sudah selesai", "tidak ada lagi perbedaan"]):
+                state.log("SUCCESS", "Claude menandakan pekerjaan selesai total. Exiting loop.")
                 break
+
         except ClaudeRateLimitError as e:
             state.log("WARN", f"Node #{account['id']} limit. Failover...")
             pool.mark_rate_limited(account["id"], reset_seconds=e.reset_seconds)
