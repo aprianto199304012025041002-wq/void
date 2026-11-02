@@ -1,6 +1,6 @@
 """
 ⚡ CLAUDE CLUSTER CONSOLE — ULTRA-COMPACT EDITION
-Modular Entry Point • Mobile Optimized & History Feed
+Modular Entry Point • Official Anthropic API Powered
 """
 
 import streamlit as st
@@ -98,19 +98,19 @@ with col_ctrl:
         render_history_feed(GSTATE.invocations)
 
     with tabs[2]:
-        st.caption("Credentials & Session Keys")
+        st.caption("Official Anthropic API Keys (console.anthropic.com)")
         v_updated = False
         for acc in pool.config.get("accounts", []):
-            st.markdown(f"**Node #{acc['id']} [{acc['name']}]**")
+            st.markdown(f"**Key #{acc['id']} [{acc['name']}]**")
+            current_k = acc.get("api_key") or acc.get("session_key", "")
             c_k, c_p = st.columns([3, 1])
             with c_k:
-                n_key = st.text_input(f"Key N0{acc['id']}", value=acc.get("session_key", ""), type="password", key=f"k_{acc['id']}", label_visibility="collapsed")
+                n_key = st.text_input(f"Key K0{acc['id']}", value=current_k, type="password", key=f"k_{acc['id']}", label_visibility="collapsed", placeholder="sk-ant-api03-...")
             with c_p:
                 if st.button("🔍 Ping", key=f"p_{acc['id']}", use_container_width=True):
-                    key_to_test = n_key.strip() if n_key.strip() else acc.get("session_key", "")
-                    cf_to_test = acc.get("cf_clearance", "")
+                    key_to_test = n_key.strip() if n_key.strip() else current_k
                     if key_to_test:
-                        test_cli = ClaudeWebClient(key_to_test, cf_clearance=cf_to_test)
+                        test_cli = ClaudeWebClient(key_to_test)
                         ok, msg = test_cli.test_connection()
                         if ok:
                             st.success(f"✔ {msg}")
@@ -119,8 +119,8 @@ with col_ctrl:
                     else:
                         st.warning("Key kosong")
 
-            if n_key != acc.get("session_key"):
-                acc["session_key"] = n_key.strip()
+            if n_key != current_k:
+                acc["api_key"] = n_key.strip()
                 v_updated = True
 
         if v_updated or st.button("Save Keys", type="primary", use_container_width=True):
@@ -129,12 +129,12 @@ with col_ctrl:
             st.rerun()
 
     with tabs[3]:
-        cd_h = st.number_input("Cooldown (Hours)", 1.0, 12.0, float(pool.config.get("cooldown_hours", 5.0)), 0.5)
+        cd_h = st.number_input("Cooldown Duration on Limit (Hours)", 0.5, 6.0, float(pool.config.get("cooldown_hours", 1.0)), 0.5)
         if st.button("Save Config", use_container_width=True):
             pool.config["cooldown_hours"] = cd_h
             pool.save_config()
             st.success("Saved")
-        if st.button("Reset Cooldown Lockouts", use_container_width=True):
+        if st.button("Reset Rate-Limit Lockouts", use_container_width=True):
             for acc in pool.state["accounts"].values():
                 acc["status"] = "ready"
                 acc["available_at"] = 0
