@@ -34,7 +34,6 @@ class GlobalWorkerState:
         self.sleeping_until_str = ""
         self.auto_stop_event = threading.Event()
 
-        # Riwayat interaksi (prompt + respon lengkap dari semua akun)
         self.invocations: List[Dict[str, Any]] = self._load_history()
 
     def _load_history(self) -> List[Dict[str, Any]]:
@@ -70,7 +69,7 @@ class GlobalWorkerState:
                 "response": response,
                 "length": len(response)
             }
-            self.invocations.insert(0, entry)  # Terbaru di urutan atas
+            self.invocations.insert(0, entry)
             self._save_history()
 
 def run_single_task(state: GlobalWorkerState, pool: ClusterPool, prompt_text: str):
@@ -91,7 +90,7 @@ def run_single_task(state: GlobalWorkerState, pool: ClusterPool, prompt_text: st
             break
 
         state.log("INFO", f"Dispatch -> Node #{account['id']} [{account['name']}]")
-        client = ClaudeWebClient(account["session_key"])
+        client = ClaudeWebClient(account["session_key"], cf_clearance=account.get("cf_clearance"))
         chat_url = account.get("tapir_chat_url", "")
 
         try:
@@ -100,8 +99,6 @@ def run_single_task(state: GlobalWorkerState, pool: ClusterPool, prompt_text: st
             state.log("SUCCESS", f"Node #{account['id']} selesai ({len(resp):,} karakter).")
             state.task_result = resp
             state.task_account = account["name"]
-            
-            # Catat ke riwayat
             state.record_invocation(account["id"], account["name"], prompt_text, resp, mode="MANUAL")
             success = True
             break
@@ -174,15 +171,13 @@ def run_auto_daemon(state: GlobalWorkerState, pool: ClusterPool, max_iter: int, 
                 break
 
         state.log("INFO", f"Kirim -> Node #{account['id']} [{account['name']}]")
-        client = ClaudeWebClient(account["session_key"])
+        client = ClaudeWebClient(account["session_key"], cf_clearance=account.get("cf_clearance"))
         chat_url = account.get("tapir_chat_url", "")
 
         try:
             resp = client.send_message(prompt_text, conversation_uuid=chat_url)
             pool.record_task_success(account["id"])
             state.log("SUCCESS", f"Node #{account['id']} menjawab ({len(resp):,} karakter).")
-
-            # Catat ke riwayat
             state.record_invocation(account["id"], account["name"], prompt_text, resp, mode=f"AUTO #{i}")
 
             resp_lower = resp.lower()
