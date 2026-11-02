@@ -1,18 +1,25 @@
 """
 Cluster Thread Workers & Global State Manager.
-Mengeksekusi single task & 24/7 infinite loop secara thread-safe.
+Mengeksekusi task & menyimpan riwayat lengkap (Command Sent & Full Responses).
 """
 
 import threading
 import time
+import os
+import json
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from src.client import ClaudeWebClient, ClaudeRateLimitError, ClaudeAuthError
 from src.pool import ClusterPool
 
+HISTORY_FILE = "history.json"
+
 class GlobalWorkerState:
-    def __init__(self):
+    def __init__(self, base_dir: str = "."):
         self.lock = threading.Lock()
+        self.base_dir = base_dir
+        self.history_path = os.path.join(base_dir, HISTORY_FILE)
+
         self.task_running = False
         self.task_logs = []
         self.task_result = None
@@ -27,10 +34,44 @@ class GlobalWorkerState:
         self.sleeping_until_str = ""
         self.auto_stop_event = threading.Event()
 
+        # Riwayat interaksi (prompt + respon lengkap dari semua akun)
+        self.invocations: List[Dict[str, Any]] = self._load_history()
+
+    def _load_history(self) -> List[Dict[str, Any]]:
+        if os.path.exists(self.history_path):
+            try:
+                with open(self.history_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return []
+
+    def _save_history(self):
+        try:
+            with open(self.history_path, "w", encoding="utf-8") as f:
+                json.dump(self.invocations[-100:], f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
     def log(self, tag: str, text: str):
         with self.lock:
             ts = datetime.now().strftime("%H:%M:%S")
             self.task_logs.append((ts, tag, text))
+
+    def record_invocation(self, account_id: int, account_name: str, prompt: str, response: str, mode: str = "SINGLE"):
+        with self.lock:
+            entry = {
+                "id": len(self.invocations) + 1,
+                "timestamp": datetime.now().strftime("%d/%m %H:%M:%S"),
+                "account_id": account_id,
+                "account_name": account_name,
+                "mode": mode,
+                "prompt": prompt,
+                "response": response,
+                "length": len(response)
+            }
+            self.invocations.insert(0, entry)  # Terbaru di urutan atas
+            self._save_history()
 
 def run_single_task(state: GlobalWorkerState, pool: ClusterPool, prompt_text: str):
     state.task_running = True
@@ -59,6 +100,9 @@ def run_single_task(state: GlobalWorkerState, pool: ClusterPool, prompt_text: st
             state.log("SUCCESS", f"Node #{account['id']} selesai ({len(resp):,} karakter).")
             state.task_result = resp
             state.task_account = account["name"]
+            
+            # Catat ke riwayat
+            state.record_invocation(account["id"], account["name"], prompt_text, resp, mode="MANUAL")
             success = True
             break
         except ClaudeRateLimitError as e:
@@ -137,6 +181,9 @@ def run_auto_daemon(state: GlobalWorkerState, pool: ClusterPool, max_iter: int, 
             resp = client.send_message(prompt_text, conversation_uuid=chat_url)
             pool.record_task_success(account["id"])
             state.log("SUCCESS", f"Node #{account['id']} menjawab ({len(resp):,} karakter).")
+
+            # Catat ke riwayat
+            state.record_invocation(account["id"], account["name"], prompt_text, resp, mode=f"AUTO #{i}")
 
             resp_lower = resp.lower()
             if any(sig in resp_lower for sig in ["seluruh audit selesai", "pekerjaan sudah selesai", "tidak ada lagi"]):
