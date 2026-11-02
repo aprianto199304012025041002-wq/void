@@ -1,6 +1,6 @@
 """
 Direct HTTP Client untuk Claude.ai internal API menggunakan curl_cffi.
-Mendukung full cookie string (sessionKey + cf_clearance) untuk bypass Cloudflare 403.
+Mendukung logging diagnosa detail saat ping/koneksi.
 """
 
 import json
@@ -34,14 +34,13 @@ class ClaudeWebClient:
             if m:
                 self.session_key = m.group(1).strip()
 
-        # Ekstrak cf_clearance jika user memasukkan seluruh document.cookie
+        # Ekstrak cf_clearance jika user memasukkan seluruh cookie string
         self.cf_clearance = None
         if "cf_clearance=" in self.raw_input:
             m_cf = re.search(r"cf_clearance=([^;]+)", self.raw_input)
             if m_cf:
                 self.cf_clearance = m_cf.group(1).strip()
 
-        # Headers identik browser asli
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "application/json, text/event-stream, text/plain, */*",
@@ -63,13 +62,26 @@ class ClaudeWebClient:
         self.org_id: Optional[str] = None
 
     def test_connection(self) -> Tuple[bool, str]:
+        url = f"{self.BASE_URL}/api/organizations"
         try:
-            org_id = self.get_organization_id()
-            return True, f"Terkoneksi (Org: {org_id[:8]}...)"
-        except ClaudeAuthError as e:
-            return False, f"Auth Gagal: {e}"
+            resp = self.session.get(url, timeout=15)
+            if resp.status_code == 200:
+                orgs = resp.json()
+                if orgs and isinstance(orgs, list):
+                    org_name = orgs[0].get("name", "Org")
+                    self.org_id = orgs[0].get("uuid", "")
+                    return True, f"OK ({org_name})"
+                return True, "OK"
+            elif resp.status_code == 403:
+                if "<title>Just a moment...</title>" in resp.text or "challenge" in resp.text.lower():
+                    return False, "Cloudflare 403 Challenge"
+                return False, f"HTTP 403 Forbidden"
+            elif resp.status_code == 401:
+                return False, "HTTP 401 (Key Hangus/Salah)"
+            else:
+                return False, f"HTTP {resp.status_code}"
         except Exception as e:
-            return False, f"Error: {e}"
+            return False, f"Network Err: {str(e)[:40]}"
 
     def get_organization_id(self) -> str:
         if self.org_id:
@@ -82,10 +94,9 @@ class ClaudeWebClient:
             raise ClaudeAPIError(f"Koneksi jaringan gagal: {e}")
 
         if resp.status_code in [401, 403]:
-            # Deteksi apakah Cloudflare Challenge
             if "<title>Just a moment...</title>" in resp.text or "challenge" in resp.text.lower():
-                raise ClaudeAuthError(f"Cloudflare 403 terpicu. Masukkan seluruh string cookie (termasuk cf_clearance).")
-            raise ClaudeAuthError(f"sessionKey tidak valid atau kedaluwarsa (HTTP {resp.status_code}).")
+                raise ClaudeAuthError(f"Cloudflare 403 terpicu.")
+            raise ClaudeAuthError(f"sessionKey tidak valid / kedaluwarsa (HTTP {resp.status_code}).")
 
         if resp.status_code != 200:
             raise ClaudeAPIError(f"Gagal mengambil organisasi: HTTP {resp.status_code}")
