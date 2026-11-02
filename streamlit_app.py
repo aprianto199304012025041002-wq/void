@@ -1,7 +1,7 @@
 """
 ⚡ CLAUDE CLUSTER CONSOLE — ULTRA-COMPACT EDITION
 High-Density DevOps Interface • Single-View Layout • No Scrolling Required
-Cloud-Native • 100% Streamlit Cloud Resilient
+Cloud-Native • 100% Streamlit Cloud Resilient • Password Protected
 """
 
 import streamlit as st
@@ -187,8 +187,60 @@ code, pre, .mono {
 .c-warn { color: #FBBF24; font-weight: 600; }
 .c-err  { color: #F87171; font-weight: 600; }
 .c-loop { color: #818CF8; font-weight: 600; }
+
+/* Auth Lock Card */
+.auth-box {
+    max-width: 400px;
+    margin: 80px auto;
+    background: #0B111A;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    padding: 28px;
+    text-align: center;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8);
+}
 </style>
 """, unsafe_allow_html=True)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SECURITY GATEWAY (CHECK st.secrets["pw"])
+# ──────────────────────────────────────────────────────────────────────────────
+def check_auth():
+    target_pw = None
+    try:
+        if hasattr(st, "secrets") and "pw" in st.secrets:
+            target_pw = st.secrets["pw"]
+    except Exception:
+        pass
+
+    # If no password configured in secrets, pass through
+    if not target_pw:
+        return True
+
+    if st.session_state.get("authenticated", False):
+        return True
+
+    st.markdown("""
+    <div class="auth-box">
+        <div style="font-size: 1.8rem; margin-bottom: 8px;">🔒</div>
+        <div style="font-family: 'Fira Code', monospace; font-size: 0.95rem; font-weight: 700; color: #38BDF8; letter-spacing: 0.05em;">SECURE CLUSTER GATEWAY</div>
+        <div style="font-size: 0.75rem; color: #64748B; margin-top: 4px; margin-bottom: 20px;">AUTHENTICATION REQUIRED TO ACCESS NODES</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        input_pass = st.text_input("Access Key", type="password", placeholder="Enter cluster password...", label_visibility="collapsed")
+        if st.button("Unlock Console", type="primary", use_container_width=True):
+            if input_pass == str(target_pw):
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Invalid Access Key.")
+    return False
+
+if not check_auth():
+    st.stop()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # WORKERS
