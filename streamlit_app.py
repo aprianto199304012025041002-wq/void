@@ -1,7 +1,7 @@
 """
 Claude Multi-Account Orchestrator — Cloud-Native Edition
 100% Berjalan di Streamlit Cloud tanpa memerlukan PC Backend / Browser Automation.
-Menggunakan Session API langsung dengan auto-failover 4 akun.
+Audited & Thread-Safe.
 """
 
 import streamlit as st
@@ -20,7 +20,40 @@ from account_manager import AccountManager
 from claude_api_client import ClaudeWebClient, ClaudeRateLimitError, ClaudeAuthError, ClaudeAPIError
 
 # ──────────────────────────────────────────────────────────────────────────────
-# PAGE CONFIG
+# GLOBAL THREAD-SAFE STATE (Menghindari Streamlit NoSessionContext Bug)
+# ──────────────────────────────────────────────────────────────────────────────
+class GlobalWorkerState:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.task_running = False
+        self.task_logs = []
+        self.task_result = None
+        self.task_error = None
+        self.task_account = None
+
+        self.auto_running = False
+        self.auto_logs = []
+        self.auto_iteration = 0
+        self.auto_max = 100
+        self.auto_stop_event = threading.Event()
+
+    def log_task(self, text: str):
+        with self.lock:
+            ts = datetime.now().strftime("%H:%M:%S")
+            self.task_logs.append(f"[{ts}] {text}")
+
+    def log_auto(self, text: str):
+        with self.lock:
+            ts = datetime.now().strftime("%H:%M:%S")
+            self.auto_logs.append(f"[{ts}] {text}")
+
+if "global_state" not in st.session_state:
+    st.session_state.global_state = GlobalWorkerState()
+
+GSTATE = st.session_state.global_state
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PAGE CONFIG & CSS
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Claude Cloud Orchestrator",
@@ -51,55 +84,24 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# SESSION STATE INITIALIZATION
-# ──────────────────────────────────────────────────────────────────────────────
-if "task_running" not in st.session_state:
-    st.session_state.task_running = False
-if "task_logs" not in st.session_state:
-    st.session_state.task_logs = []
-if "task_result" not in st.session_state:
-    st.session_state.task_result = None
-if "task_error" not in st.session_state:
-    st.session_state.task_error = None
-if "task_account" not in st.session_state:
-    st.session_state.task_account = None
-
-if "auto_running" not in st.session_state:
-    st.session_state.auto_running = False
-if "auto_logs" not in st.session_state:
-    st.session_state.auto_logs = []
-if "auto_iteration" not in st.session_state:
-    st.session_state.auto_iteration = 0
-if "auto_max" not in st.session_state:
-    st.session_state.auto_max = 100
-if "auto_stop_event" not in st.session_state:
-    st.session_state.auto_stop_event = threading.Event()
-
 acc_mgr = AccountManager(BASE_DIR)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# LOGGING HELPER
-# ──────────────────────────────────────────────────────────────────────────────
-def append_log(target: list, text: str):
-    ts = datetime.now().strftime("%H:%M:%S")
-    target.append(f"[{ts}] {text}")
-
 def render_log(log_list: list, max_lines: int = 100):
-    text = "\n".join(log_list[-max_lines:]) if log_list else "Menunggu instruksi..."
+    text = "\n".join(log_list[-max_lines:]) if log_list else "Belum ada log aktif..."
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     st.markdown(f'<div class="log-terminal">{text}</div>', unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# WORKER: SINGLE TASK
+# WORKERS
 # ──────────────────────────────────────────────────────────────────────────────
-def execute_single_task(prompt_text: str):
-    st.session_state.task_running = True
-    st.session_state.task_logs = []
-    st.session_state.task_result = None
-    st.session_state.task_error = None
+def _thread_single_task(prompt_text: str):
+    GSTATE.task_running = True
+    GSTATE.task_logs = []
+    GSTATE.task_result = None
+    GSTATE.task_error = None
+    GSTATE.task_account = None
 
-    append_log(st.session_state.task_logs, f"Memulai task: '{prompt_text[:60]}...'")
+    GSTATE.log_task(f"Memulai task: '{prompt_text[:60]}...'")
     
     max_attempts = len(acc_mgr.config.get("accounts", []))
     attempts = 0
@@ -108,90 +110,85 @@ def execute_single_task(prompt_text: str):
     while attempts < max_attempts:
         account = acc_mgr.get_available_account()
         if not account:
-            append_log(st.session_state.task_logs, "⚠️ Semua akun Claude sedang cooldown atau belum diisi Session Key!")
-            st.session_state.task_error = "Semua akun dalam masa jeda 5 jam atau sessionKey kosong."
+            GSTATE.log_task("⚠️ Semua akun Claude sedang cooldown atau belum diisi Session Key!")
+            GSTATE.task_error = "Semua akun dalam masa jeda 5 jam atau sessionKey kosong."
             break
 
-        append_log(st.session_state.task_logs, f"🚀 Mengirim ke {account['name']} (ID: {account['id']})...")
+        GSTATE.log_task(f"🚀 Mengirim ke {account['name']} (ID: {account['id']})...")
         client = ClaudeWebClient(account["session_key"])
         chat_url = account.get("tapir_chat_url", "")
 
         try:
             resp = client.send_message(prompt_text, conversation_uuid=chat_url)
             acc_mgr.record_task_success(account["id"])
-            append_log(st.session_state.task_logs, f"✅ Berhasil mendapatkan respons ({len(resp):,} karakter).")
+            GSTATE.log_task(f"✅ Sukses! Diterima {len(resp):,} karakter respons.")
             
-            st.session_state.task_result = resp
-            st.session_state.task_account = account["name"]
+            GSTATE.task_result = resp
+            GSTATE.task_account = account["name"]
             success = True
             break
 
         except ClaudeRateLimitError as e:
-            append_log(st.session_state.task_logs, f"⏳ {account['name']} terkena Rate Limit 5 Jam. Melakukan auto-failover...")
+            GSTATE.log_task(f"⏳ {account['name']} terkena Rate Limit 5 Jam: {e}. Auto-failover...")
             acc_mgr.mark_rate_limited(account["id"], reset_seconds=e.reset_seconds)
             attempts += 1
         except ClaudeAuthError as e:
-            append_log(st.session_state.task_logs, f"🔐 Auth Error pada {account['name']}: {e}")
+            GSTATE.log_task(f"🔐 Auth Error pada {account['name']}: {e}")
             attempts += 1
         except Exception as e:
-            append_log(st.session_state.task_logs, f"❌ Terjadi kesalahan pada {account['name']}: {e}")
+            GSTATE.log_task(f"❌ Error pada {account['name']}: {e}")
             attempts += 1
 
-    if not success and not st.session_state.task_error:
-        st.session_state.task_error = "Gagal menyelesaikan task di semua akun."
+    if not success and not GSTATE.task_error:
+        GSTATE.task_error = "Gagal menyelesaikan task di seluruh akun Claude."
 
-    st.session_state.task_running = False
+    GSTATE.task_running = False
 
-# ──────────────────────────────────────────────────────────────────────────────
-# WORKER: AUTO RUNNER LOOP (BACKGROUND THREAD)
-# ──────────────────────────────────────────────────────────────────────────────
-def auto_runner_thread(max_iter: int, prompt_text: str, stop_event: threading.Event, logs: list):
-    append_log(logs, f"🔄 Auto-Runner dimulai. Target: {max_iter} iterasi | Prompt: '{prompt_text}'")
+def _thread_auto_runner(max_iter: int, prompt_text: str):
+    GSTATE.log_auto(f"🔄 Auto-Runner aktif. Target: {max_iter} iterasi | Prompt: '{prompt_text}'")
     
     for i in range(1, max_iter + 1):
-        if stop_event.is_set():
-            append_log(logs, "⏹️ Auto-runner dihentikan pengguna.")
+        if GSTATE.auto_stop_event.is_set():
+            GSTATE.log_auto("⏹️ Auto-runner dihentikan pengguna.")
             break
 
-        st.session_state.auto_iteration = i
-        append_log(logs, f"\n>>> Iterasi #{i} / {max_iter}")
+        GSTATE.auto_iteration = i
+        GSTATE.log_auto(f"\n>>> Iterasi #{i} / {max_iter}")
 
         account = acc_mgr.get_available_account()
         if not account:
-            append_log(logs, "💤 Semua akun sedang cooldown. Menunggu 60 detik sebelum periksa kembali...")
+            GSTATE.log_auto("💤 Semua akun cooldown. Istirahat 60 detik sebelum periksa kembali...")
             for _ in range(60):
-                if stop_event.is_set():
+                if GSTATE.auto_stop_event.is_set():
                     break
                 time.sleep(1)
             continue
 
-        append_log(logs, f"Mengirim perintah ke {account['name']}...")
+        GSTATE.log_auto(f"Kirim instruksi ke {account['name']}...")
         client = ClaudeWebClient(account["session_key"])
         chat_url = account.get("tapir_chat_url", "")
 
         try:
             resp = client.send_message(prompt_text, conversation_uuid=chat_url)
             acc_mgr.record_task_success(account["id"])
-            append_log(logs, f"✅ Sukses [{account['name']}] - {len(resp)} karakter")
+            GSTATE.log_auto(f"✅ Selesai [{account['name']}] - {len(resp):,} karakter")
 
-            # Cek sinyal selesai
             resp_lower = resp.lower()
             if any(sig in resp_lower for sig in ["seluruh audit selesai", "pekerjaan sudah selesai", "tidak ada lagi"]):
-                append_log(logs, "🎉 Claude mengindikasikan seluruh pekerjaan SELESAI!")
+                GSTATE.log_auto("🎉 Claude menandakan bahwa seluruh pekerjaan SELESAI!")
                 break
 
         except ClaudeRateLimitError as e:
-            append_log(logs, f"⏳ Rate limit pada {account['name']}. Beralih ke akun berikutnya...")
+            GSTATE.log_auto(f"⏳ Rate limit [{account['name']}]. Beralih ke akun berikutnya...")
             acc_mgr.mark_rate_limited(account["id"], reset_seconds=e.reset_seconds)
         except Exception as e:
-            append_log(logs, f"❌ Error: {e}")
+            GSTATE.log_auto(f"❌ Error [{account['name']}]: {e}")
 
-        # Jeda
-        if not stop_event.is_set():
+        if not GSTATE.auto_stop_event.is_set():
             time.sleep(5)
 
-    append_log(logs, "🏁 Auto-runner selesai.")
-    st.session_state.auto_running = False
+    GSTATE.log_auto("🏁 Auto-runner selesai.")
+    GSTATE.auto_running = False
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SIDEBAR
@@ -212,8 +209,10 @@ with st.sidebar:
     ready_count = sum(1 for s in summary if s["status"] == "READY")
     st.write(f"Akun Siap: **{ready_count} / {len(summary)}**")
     
-    if st.session_state.auto_running:
-        st.warning(f"🔄 Auto-Runner Aktif (#{st.session_state.auto_iteration})")
+    if GSTATE.auto_running:
+        st.warning(f"🔄 Auto-Runner Aktif (#{GSTATE.auto_iteration})")
+    elif GSTATE.task_running:
+        st.info("⏳ Single task sedang berjalan...")
     
     if st.button("🔃 Refresh Status", use_container_width=True):
         st.rerun()
@@ -223,7 +222,7 @@ with st.sidebar:
 # ══════════════════════════════════════════════════════════════════════════════
 if page == "📊 Dashboard":
     st.title("📊 Status Pool Akun Claude (Cloud)")
-    st.caption("Terhubung langsung ke API Claude via Cloud-Safe Session")
+    st.caption("Auto-failover antar 4 akun tanpa server lokal")
 
     summary = acc_mgr.get_status_summary()
     ready_n = sum(1 for s in summary if s["status"] == "READY")
@@ -256,7 +255,7 @@ if page == "📊 Dashboard":
                 st.caption(f"Tasks: {s['total_tasks']}")
 
     if nokey_n > 0:
-        st.info("💡 Beberapa akun belum memiliki sessionKey. Buka menu **🔑 Setup Akun (Cookies)** di sebelah kiri untuk memasukkannya.")
+        st.info("💡 Beberapa akun belum memiliki sessionKey. Buka menu **🔑 Setup Akun (Cookies)** di sidebar untuk memasukkannya.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: JALANKAN TASK
@@ -266,70 +265,71 @@ elif page == "🚀 Jalankan Task":
 
     task_input = st.text_area(
         "Instruksi / Pertanyaan untuk Claude:",
-        placeholder="Contoh: Lakukan audit modul autentikasi atau analisa bug...",
+        placeholder="Contoh: Lakukan audit modul autentikasi atau periksa bug...",
         height=140
     )
 
-    if st.button("▶️ Kirim Task", type="primary", disabled=st.session_state.task_running, use_container_width=True):
+    if st.button("▶️ Kirim Task", type="primary", disabled=GSTATE.task_running, use_container_width=True):
         if task_input.strip():
-            execute_single_task(task_input)
+            t = threading.Thread(target=_thread_single_task, args=(task_input,), daemon=True)
+            t.start()
             st.rerun()
 
-    if st.session_state.task_logs:
+    if GSTATE.task_running or GSTATE.task_logs:
         st.subheader("📟 Log Eksekusi")
-        render_log(st.session_state.task_logs)
+        render_log(GSTATE.task_logs)
 
-    if st.session_state.task_result:
-        st.success(f"✅ Selesai! Dijawab oleh: **{st.session_state.task_account}**")
+        if GSTATE.task_running:
+            time.sleep(2)
+            st.rerun()
+
+    if GSTATE.task_result:
+        st.success(f"✅ Selesai! Dijawab oleh: **{GSTATE.task_account}**")
         with st.expander("💬 Respons Claude", expanded=True):
-            st.markdown(st.session_state.task_result)
+            st.markdown(GSTATE.task_result)
 
-    if st.session_state.task_error:
-        st.error(f"❌ {st.session_state.task_error}")
+    if GSTATE.task_error:
+        st.error(f"❌ {GSTATE.task_error}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: AUTO RUNNER
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "🔄 Auto Runner":
     st.title("🔄 Auto Runner")
-    st.info("Auto Runner akan mengirim pesan berulang (misal 'lanjut') secara otomatis dan memutar 4 akun jika terkena rate limit.")
+    st.info("Auto Runner mengirim perintah berulang kali (misal: 'lanjut') dan otomatis memutar akun jika limit 5 jam tercapai.")
 
     c1, c2 = st.columns(2)
     with c1:
-        max_i = st.number_input("Maksimum Iterasi", 1, 500, 100, disabled=st.session_state.auto_running)
+        max_i = st.number_input("Maksimum Iterasi", 1, 500, 100, disabled=GSTATE.auto_running)
     with c2:
-        prompt_auto = st.text_input("Prompt Tiap Langkah", value="lanjut", disabled=st.session_state.auto_running)
+        prompt_auto = st.text_input("Prompt Tiap Langkah", value="lanjut", disabled=GSTATE.auto_running)
 
     b1, b2 = st.columns(2)
     with b1:
-        if st.button("▶️ Mulai Auto-Runner", type="primary", disabled=st.session_state.auto_running, use_container_width=True):
-            st.session_state.auto_stop_event.clear()
-            st.session_state.auto_running = True
-            st.session_state.auto_logs = []
-            st.session_state.auto_iteration = 0
-            st.session_state.auto_max = max_i
-            t = threading.Thread(
-                target=auto_runner_thread,
-                args=(max_i, prompt_auto, st.session_state.auto_stop_event, st.session_state.auto_logs),
-                daemon=True
-            )
+        if st.button("▶️ Mulai Auto-Runner", type="primary", disabled=GSTATE.auto_running, use_container_width=True):
+            GSTATE.auto_stop_event.clear()
+            GSTATE.auto_running = True
+            GSTATE.auto_logs = []
+            GSTATE.auto_iteration = 0
+            GSTATE.auto_max = max_i
+            t = threading.Thread(target=_thread_auto_runner, args=(max_i, prompt_auto), daemon=True)
             t.start()
             st.rerun()
 
     with b2:
-        if st.button("⏹️ Hentikan", disabled=not st.session_state.auto_running, use_container_width=True):
-            st.session_state.auto_stop_event.set()
-            st.session_state.auto_running = False
+        if st.button("⏹️ Hentikan", disabled=not GSTATE.auto_running, use_container_width=True):
+            GSTATE.auto_stop_event.set()
+            GSTATE.auto_running = False
             st.warning("Mengirim sinyal berhenti...")
             st.rerun()
 
-    if st.session_state.auto_running or st.session_state.auto_logs:
-        if st.session_state.auto_max > 0:
-            st.progress(min(1.0, st.session_state.auto_iteration / st.session_state.auto_max), 
-                        text=f"Iterasi {st.session_state.auto_iteration} / {st.session_state.auto_max}")
-        render_log(st.session_state.auto_logs)
+    if GSTATE.auto_running or GSTATE.auto_logs:
+        if GSTATE.auto_max > 0:
+            st.progress(min(1.0, GSTATE.auto_iteration / GSTATE.auto_max), 
+                        text=f"Iterasi {GSTATE.auto_iteration} / {GSTATE.auto_max}")
+        render_log(GSTATE.auto_logs)
 
-        if st.session_state.auto_running:
+        if GSTATE.auto_running:
             time.sleep(3)
             st.rerun()
 
@@ -340,12 +340,12 @@ elif page == "🔑 Setup Akun (Cookies)":
     st.title("🔑 Setup Session Key Akun Claude")
     
     st.markdown("""
-    ### 📌 Cara Mengambil `sessionKey` dari Browser (1 Menit):
+    ### 📌 Cara Mengambil `sessionKey` dari Browser:
     1. Buka browser dan login ke akun Claude Anda di **https://claude.ai**.
-    2. Tekan **F12** (atau klik kanan -> *Inspect*), lalu buka tab **Application** (atau **Storage** di Firefox).
+    2. Tekan **F12** (Developer Tools) -> Tab **Application** (Chrome/Edge) atau **Storage** (Firefox).
     3. Di panel kiri, klik **Cookies** -> `https://claude.ai`.
-    4. Cari nama cookie **`sessionKey`** (nilainya biasanya dimulai dengan `sk-ant-sid01-...`).
-    5. Klik dua kali nilainya, salin (*Copy*), dan tempelkan pada form akun di bawah ini.
+    4. Cari baris bernama **`sessionKey`** (dimulai dengan `sk-ant-sid01-...`).
+    5. Salin nilainya dan tempelkan ke kolom form akun di bawah.
     """)
 
     st.divider()
@@ -356,20 +356,32 @@ elif page == "🔑 Setup Akun (Cookies)":
     for acc in accounts:
         with st.expander(f"⚙️ {acc['name']} (Akun #{acc['id']})", expanded=not bool(acc.get("session_key"))):
             current_key = acc.get("session_key", "")
-            masked = current_key[:15] + "..." + current_key[-6:] if len(current_key) > 25 else current_key
             
-            st.caption(f"Status saat ini: {'🟢 Terisi (' + masked + ')' if current_key else '🔴 Belum diisi'}")
-            
-            new_key = st.text_input(
-                f"sessionKey untuk {acc['name']}",
-                value=current_key,
-                type="password",
-                placeholder="sk-ant-sid01-xxxx-xxxx...",
-                key=f"input_key_{acc['id']}"
-            )
-            
+            c_input, c_test = st.columns([4, 1])
+            with c_input:
+                new_key = st.text_input(
+                    f"sessionKey untuk {acc['name']}",
+                    value=current_key,
+                    type="password",
+                    placeholder="sk-ant-sid01-xxxx-xxxx...",
+                    key=f"input_key_{acc['id']}"
+                )
+            with c_test:
+                st.write("")
+                st.write("")
+                if st.button("🔍 Uji Key", key=f"btn_test_{acc['id']}"):
+                    if new_key.strip():
+                        test_cli = ClaudeWebClient(new_key.strip())
+                        ok, msg = test_cli.test_connection()
+                        if ok:
+                            st.success(f"✅ {msg}")
+                        else:
+                            st.error(f"❌ {msg}")
+                    else:
+                        st.warning("Masukkan sessionKey terlebih dahulu.")
+
             chat_url = st.text_input(
-                f"Chat URL / UUID (Opsional, untuk melanjutkan thread tertentu):",
+                f"Thread URL / UUID (Opsional, untuk melanjutkan percakapan TAPIR):",
                 value=acc.get("tapir_chat_url", ""),
                 key=f"input_url_{acc['id']}"
             )
@@ -379,10 +391,27 @@ elif page == "🔑 Setup Akun (Cookies)":
                 acc["tapir_chat_url"] = chat_url.strip()
                 updated = True
 
-    if updated or st.button("💾 Simpan Semua Session Key", type="primary", use_container_width=True):
+    if updated or st.button("💾 Simpan Konfigurasi", type="primary", use_container_width=True):
         acc_mgr.save_config()
-        st.success("✅ Semua session key berhasil disimpan! Sekarang Anda bisa langsung menjalankan task.")
+        st.success("✅ Konfigurasi akun berhasil disimpan!")
         st.rerun()
+
+    st.divider()
+    with st.expander("🛡️ Tips: Simpan Permanen di Streamlit Secrets (Anti-Reset)"):
+        st.markdown("""
+        Agar `sessionKey` tidak hilang saat container Streamlit Cloud restart, Anda bisa memasukkannya ke **Streamlit Dashboard -> App Settings -> Secrets**:
+        ```toml
+        [[accounts]]
+        id = 1
+        name = "Claude Account 1"
+        session_key = "sk-ant-sid01-..."
+
+        [[accounts]]
+        id = 2
+        name = "Claude Account 2"
+        session_key = "sk-ant-sid01-..."
+        ```
+        """)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: PENGATURAN
