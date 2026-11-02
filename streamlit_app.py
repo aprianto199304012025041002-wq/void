@@ -95,27 +95,32 @@ with col_ctrl:
                 st.markdown(GSTATE.task_result)
 
     with tabs[1]:
-        # Riwayat lengkap command sent & response received dari semua akun
         render_history_feed(GSTATE.invocations)
 
     with tabs[2]:
-        st.caption("Inspect `claude.ai` -> F12 -> Cookies -> `sessionKey`")
+        st.caption("Credentials & Session Keys")
         v_updated = False
         for acc in pool.config.get("accounts", []):
+            st.markdown(f"**Node #{acc['id']} [{acc['name']}]**")
             c_k, c_p = st.columns([3, 1])
             with c_k:
-                n_key = st.text_input(f"N0{acc['id']} key", value=acc.get("session_key", ""), type="password", key=f"k_{acc['id']}")
+                n_key = st.text_input(f"Key N0{acc['id']}", value=acc.get("session_key", ""), type="password", key=f"k_{acc['id']}", label_visibility="collapsed")
             with c_p:
-                st.write("")
-                if st.button("Ping", key=f"p_{acc['id']}", use_container_width=True):
+                if st.button("🔍 Ping", key=f"p_{acc['id']}", use_container_width=True):
                     if n_key.strip():
                         test_cli = ClaudeWebClient(n_key.strip())
                         ok, msg = test_cli.test_connection()
-                        if ok: st.success("OK")
-                        else: st.error("ERR")
+                        if ok:
+                            st.success(f"✔ {msg}")
+                        else:
+                            st.error(f"✖ {msg}")
+                    else:
+                        st.warning("Key kosong")
+
             if n_key != acc.get("session_key"):
                 acc["session_key"] = n_key.strip()
                 v_updated = True
+
         if v_updated or st.button("Save Keys", type="primary", use_container_width=True):
             pool.save_config()
             st.success("Keys saved!")
