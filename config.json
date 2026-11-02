@@ -1,32 +1,29 @@
 {
-    "headless":  false,
-    "repo_path":  "",
-    "cooldown_hours":  5,
-    "github_pat":  "",
-    "accounts":  [
-                     {
-                         "profile_dir":  "profiles/account_1",
-                         "name":  "Claude Account 1",
-                         "id":  1,
-                         "tapir_chat_url":  "https://claude.ai/chat/f51cbb3c-8d7e-455e-8598-236271016a47"
-                     },
-                     {
-                         "profile_dir":  "profiles/account_2",
-                         "name":  "Claude Account 2",
-                         "id":  2,
-                         "tapir_chat_url":  "https://claude.ai/chat/930c7ed1-62a8-475d-9a87-f22df858cde2"
-                     },
-                     {
-                         "profile_dir":  "profiles/account_3",
-                         "name":  "Claude Account 3",
-                         "id":  3,
-                         "tapir_chat_url":  "https://claude.ai/chat/03c28d45-23fe-4a5c-a08c-58d5511c268a"
-                     },
-                     {
-                         "profile_dir":  "profiles/account_4",
-                         "name":  "Claude Account 4",
-                         "id":  4,
-                         "tapir_chat_url":  "https://claude.ai/chat/f898f5a0-427c-4c3e-bad6-0c2955b986b5"
-                     }
-                 ]
+  "accounts": [
+    {
+      "id": 1,
+      "name": "Claude Account 1",
+      "session_key": "",
+      "tapir_chat_url": "https://claude.ai/chat/f51cbb3c-8d7e-455e-8598-236271016a47"
+    },
+    {
+      "id": 2,
+      "name": "Claude Account 2",
+      "session_key": "",
+      "tapir_chat_url": "https://claude.ai/chat/930c7ed1-62a8-475d-9a87-f22df858cde2"
+    },
+    {
+      "id": 3,
+      "name": "Claude Account 3",
+      "session_key": "",
+      "tapir_chat_url": "https://claude.ai/chat/03c28d45-23fe-4a5c-a08c-58d5511c268a"
+    },
+    {
+      "id": 4,
+      "name": "Claude Account 4",
+      "session_key": "",
+      "tapir_chat_url": "https://claude.ai/chat/f898f5a0-427c-4c3e-bad6-0c2955b986b5"
+    }
+  ],
+  "cooldown_hours": 5.0
 }
