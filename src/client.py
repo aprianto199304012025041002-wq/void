@@ -1,6 +1,6 @@
 """
 Direct HTTP Client untuk Claude.ai internal API menggunakan curl_cffi.
-Bypass TLS Cloudflare tanpa browser.
+Mendukung full cookie string (sessionKey + cf_clearance) untuk bypass Cloudflare 403.
 """
 
 import json
@@ -23,25 +23,43 @@ class ClaudeAuthError(Exception):
 class ClaudeWebClient:
     BASE_URL = "https://claude.ai"
 
-    def __init__(self, session_key: str):
-        self.session_key = session_key.strip()
-        if "sessionKey=" in self.session_key:
-            m = re.search(r"sessionKey=([^;]+)", self.session_key)
+    def __init__(self, raw_cookie_or_key: str):
+        self.raw_input = raw_cookie_or_key.strip()
+        self.session = requests.Session(impersonate="chrome124")
+        
+        # Ekstrak sessionKey
+        self.session_key = self.raw_input
+        if "sessionKey=" in self.raw_input:
+            m = re.search(r"sessionKey=([^;]+)", self.raw_input)
             if m:
                 self.session_key = m.group(1).strip()
 
-        self.session = requests.Session(impersonate="chrome124")
+        # Ekstrak cf_clearance jika user memasukkan seluruh document.cookie
+        self.cf_clearance = None
+        if "cf_clearance=" in self.raw_input:
+            m_cf = re.search(r"cf_clearance=([^;]+)", self.raw_input)
+            if m_cf:
+                self.cf_clearance = m_cf.group(1).strip()
+
+        # Headers identik browser asli
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "application/json, text/event-stream, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
             "Referer": "https://claude.ai/chats",
             "Origin": "https://claude.ai",
+            "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
         })
+
         self.session.cookies.set("sessionKey", self.session_key, domain="claude.ai")
+        if self.cf_clearance:
+            self.session.cookies.set("cf_clearance", self.cf_clearance, domain="claude.ai")
+
         self.org_id: Optional[str] = None
 
     def test_connection(self) -> Tuple[bool, str]:
@@ -64,6 +82,9 @@ class ClaudeWebClient:
             raise ClaudeAPIError(f"Koneksi jaringan gagal: {e}")
 
         if resp.status_code in [401, 403]:
+            # Deteksi apakah Cloudflare Challenge
+            if "<title>Just a moment...</title>" in resp.text or "challenge" in resp.text.lower():
+                raise ClaudeAuthError(f"Cloudflare 403 terpicu. Masukkan seluruh string cookie (termasuk cf_clearance).")
             raise ClaudeAuthError(f"sessionKey tidak valid atau kedaluwarsa (HTTP {resp.status_code}).")
 
         if resp.status_code != 200:
