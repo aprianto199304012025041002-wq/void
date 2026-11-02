@@ -1,6 +1,5 @@
 """
-Account Pool Manager & Cooldown State Tracker.
-Mendukung pembacaan st.secrets (Cloud) dan config.json (lokal).
+Account Pool Manager & Cooldown State Tracker for Official Anthropic API.
 """
 
 import json
@@ -24,7 +23,7 @@ class ClusterPool:
         self.state = self._load_state()
 
     def _load_config(self) -> dict:
-        cfg = {"accounts": [], "cooldown_hours": 5.0}
+        cfg = {"accounts": [], "cooldown_hours": 1.0}
         if os.path.exists(self.config_path):
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
@@ -35,17 +34,27 @@ class ClusterPool:
         # Injeksi dari st.secrets jika di deploy ke Streamlit Cloud
         try:
             import streamlit as st
-            if hasattr(st, "secrets") and "accounts" in st.secrets:
-                for idx, s_acc in enumerate(st.secrets["accounts"]):
-                    acc_id = s_acc.get("id", idx + 1)
-                    matched = next((a for a in cfg["accounts"] if a["id"] == acc_id), None)
-                    if matched:
-                        if s_acc.get("session_key"):
-                            matched["session_key"] = s_acc["session_key"]
-                        if s_acc.get("cf_clearance"):
-                            matched["cf_clearance"] = s_acc["cf_clearance"]
-                    else:
-                        cfg["accounts"].append(dict(s_acc))
+            if hasattr(st, "secrets"):
+                # Mendukung format tunggal: anthropic_api_key = "sk-ant-..."
+                if "anthropic_api_key" in st.secrets:
+                    cfg["accounts"] = [{
+                        "id": 1,
+                        "name": "Anthropic Primary Key",
+                        "api_key": st.secrets["anthropic_api_key"]
+                    }]
+                # Atau format multi-account: [[accounts]]
+                elif "accounts" in st.secrets:
+                    for idx, s_acc in enumerate(st.secrets["accounts"]):
+                        acc_id = s_acc.get("id", idx + 1)
+                        matched = next((a for a in cfg["accounts"] if a["id"] == acc_id), None)
+                        key_val = s_acc.get("api_key") or s_acc.get("session_key", "")
+                        if matched:
+                            if key_val:
+                                matched["api_key"] = key_val
+                        else:
+                            new_entry = dict(s_acc)
+                            new_entry["api_key"] = key_val
+                            cfg["accounts"].append(new_entry)
         except Exception:
             pass
 
@@ -64,7 +73,7 @@ class ClusterPool:
             acc_id = str(acc["id"])
             default_state["accounts"][acc_id] = {
                 "id": acc["id"],
-                "name": acc.get("name", f"Account {acc['id']}"),
+                "name": acc.get("name", f"Key #{acc['id']}"),
                 "status": "ready",
                 "available_at": 0,
                 "cooldown_until_str": "",
@@ -119,16 +128,19 @@ class ClusterPool:
             acc_state = self.state.get("accounts", {}).get(str(aid), {})
             if acc_state.get("status") == "ready":
                 conf = next((a for a in accounts if a["id"] == aid), None)
-                if conf and conf.get("session_key"):
+                key_val = conf.get("api_key") or conf.get("session_key") if conf else None
+                if conf and key_val:
                     self.state["current_account_id"] = aid
                     self.save_state()
-                    return {**conf, **acc_state}
+                    res = {**conf, **acc_state}
+                    res["api_key"] = key_val
+                    return res
 
         return None
 
     def mark_rate_limited(self, account_id: int, reset_seconds: Optional[int] = None):
         now = time.time()
-        duration = reset_seconds if reset_seconds else int(self.config.get("cooldown_hours", 5.0) * 3600)
+        duration = reset_seconds if reset_seconds else 3600
         cooldown_until = now + duration
         cooldown_str = (datetime.now() + timedelta(seconds=duration)).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -167,16 +179,15 @@ class ClusterPool:
             s = self.state.get("accounts", {}).get(aid, {})
             status = s.get("status", "ready")
             wait_str = "-"
-            has_key = bool(acc_conf.get("session_key"))
+            has_key = bool(acc_conf.get("api_key") or acc_conf.get("session_key"))
 
             if not has_key:
                 display_status = "NO_KEY"
             elif status == "rate_limited":
                 display_status = "RATE_LIMITED"
                 remaining = max(0, int(s.get("available_at", 0) - now))
-                hours = remaining // 3600
-                minutes = (remaining % 3600) // 60
-                wait_str = f"{hours}h {minutes}m"
+                minutes = max(1, remaining // 60)
+                wait_str = f"{minutes}m left"
             else:
                 display_status = "READY"
 
