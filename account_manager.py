@@ -7,7 +7,6 @@ from typing import Dict, List, Optional, Tuple
 STATE_FILE = "state.json"
 CONFIG_FILE = "config.json"
 
-
 class AccountManager:
     def __init__(self, base_dir: str):
         self.base_dir = base_dir
@@ -18,8 +17,11 @@ class AccountManager:
 
     def _load_config(self) -> dict:
         if os.path.exists(self.config_path):
-            with open(self.config_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+            try:
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
         return {"accounts": [], "cooldown_hours": 5.0}
 
     def _load_state(self) -> dict:
@@ -30,7 +32,6 @@ class AccountManager:
             except Exception:
                 pass
 
-        # Initialize default state
         default_state = {
             "accounts": {},
             "current_account_id": 1,
@@ -49,33 +50,38 @@ class AccountManager:
         return default_state
 
     def save_state(self):
-        with open(self.state_path, "w", encoding="utf-8") as f:
-            json.dump(self.state, f, indent=2)
+        try:
+            with open(self.state_path, "w", encoding="utf-8") as f:
+                json.dump(self.state, f, indent=2)
+        except Exception:
+            pass
+
+    def save_config(self):
+        try:
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                json.dump(self.config, f, indent=2)
+        except Exception:
+            pass
 
     def refresh_statuses(self):
-        """Check all accounts and reset those whose 5-hour cooldown has expired."""
         now = time.time()
         for acc_id, acc in self.state["accounts"].items():
             if acc["status"] == "rate_limited":
-                if now >= acc["available_at"]:
+                if now >= acc.get("available_at", 0):
                     acc["status"] = "ready"
                     acc["available_at"] = 0
                     acc["cooldown_until_str"] = ""
-                    print(f"[Account Pool] Cooldown expired for {acc['name']}. Status is now READY.")
         self.save_state()
 
     def get_available_account(self) -> Optional[dict]:
-        """Get the next ready account in round-robin sequence."""
         self.refresh_statuses()
         accounts = self.config.get("accounts", [])
         if not accounts:
             return None
 
-        # Start search from current_account_id
         start_id = self.state.get("current_account_id", 1)
         acc_ids = [acc["id"] for acc in accounts]
 
-        # Order candidates starting from start_id
         if start_id in acc_ids:
             idx = acc_ids.index(start_id)
             ordered_ids = acc_ids[idx:] + acc_ids[:idx]
@@ -85,16 +91,16 @@ class AccountManager:
         for aid in ordered_ids:
             acc_state = self.state["accounts"].get(str(aid))
             if acc_state and acc_state.get("status") == "ready":
-                self.state["current_account_id"] = aid
-                self.save_state()
-                # Return combined config + state
                 conf = next(a for a in accounts if a["id"] == aid)
-                return {**conf, **acc_state}
+                # Pastikan session_key terisi
+                if conf.get("session_key"):
+                    self.state["current_account_id"] = aid
+                    self.save_state()
+                    return {**conf, **acc_state}
 
         return None
 
     def mark_rate_limited(self, account_id: int, reset_seconds: Optional[int] = None):
-        """Mark account as rate-limited and set cooldown timer."""
         now = time.time()
         duration = reset_seconds if reset_seconds else int(self.config.get("cooldown_hours", 5.0) * 3600)
         cooldown_until = now + duration
@@ -106,9 +112,7 @@ class AccountManager:
             acc["status"] = "rate_limited"
             acc["available_at"] = cooldown_until
             acc["cooldown_until_str"] = cooldown_str
-            print(f"[Account Pool] {acc['name']} rate-limited. Cooldown until {cooldown_str} (~{duration // 60} mins).")
 
-        # Advance current_account_id to next account
         accounts = self.config.get("accounts", [])
         acc_ids = [a["id"] for a in accounts]
         if account_id in acc_ids:
@@ -139,12 +143,13 @@ class AccountManager:
                 remaining = max(0, int(s.get("available_at", 0) - now))
                 hours = remaining // 3600
                 minutes = (remaining % 3600) // 60
-                wait_str = f"{hours}h {minutes}m remaining (until {s.get('cooldown_until_str', '')})"
+                wait_str = f"{hours}h {minutes}m remaining ({s.get('cooldown_until_str', '')})"
 
             summary.append({
                 "id": acc_conf["id"],
                 "name": acc_conf.get("name"),
-                "status": status.upper(),
+                "has_key": bool(acc_conf.get("session_key")),
+                "status": status.upper() if acc_conf.get("session_key") else "NO_KEY",
                 "cooldown": wait_str,
                 "total_tasks": s.get("total_tasks", 0),
             })
