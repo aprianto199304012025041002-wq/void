@@ -1,202 +1,223 @@
 """
-Account Pool Manager & Cooldown State Tracker for Official Anthropic API.
+Pool Manager — mengelola rotasi akun Claude free web.
+Membaca konfigurasi dari config.json dan menginjeksi
+session keys dari st.secrets (Streamlit Cloud).
 """
 
 import json
 import os
 import time
 import threading
-from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import Dict, List, Optional, Any
 
-STATE_FILE = "state.json"
-CONFIG_FILE = "config.json"
+try:
+    import streamlit as st
+    _HAS_ST = True
+except ImportError:
+    _HAS_ST = False
 
-class ClusterPool:
-    _lock = threading.Lock()
+# Status akun
+STATUS_READY    = "ready"
+STATUS_WORKING  = "working"
+STATUS_COOLDOWN = "cooldown"
+STATUS_ERROR    = "error"
 
-    def __init__(self, base_dir: str):
-        self.base_dir = base_dir
-        self.config_path = os.path.join(base_dir, CONFIG_FILE)
-        self.state_path = os.path.join(base_dir, STATE_FILE)
-        self.config = self._load_config()
-        self.state = self._load_state()
+# Cooldown 5 jam (18000 detik)
+COOLDOWN_SECONDS = 18_000
 
-    def _load_config(self) -> dict:
-        cfg = {"accounts": [], "cooldown_hours": 1.0}
-        if os.path.exists(self.config_path):
-            try:
-                with open(self.config_path, "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
-            except Exception:
-                pass
 
-        # Injeksi dari st.secrets jika di deploy ke Streamlit Cloud
+def _load_secrets() -> dict:
+    """Ambil secrets dari st.secrets jika tersedia, fallback ke env vars."""
+    out = {}
+    if _HAS_ST:
         try:
-            import streamlit as st
-            if hasattr(st, "secrets"):
-                # Mendukung format tunggal: anthropic_api_key = "sk-ant-..."
-                if "anthropic_api_key" in st.secrets:
-                    cfg["accounts"] = [{
-                        "id": 1,
-                        "name": "Anthropic Primary Key",
-                        "api_key": st.secrets["anthropic_api_key"]
-                    }]
-                # Atau format multi-account: [[accounts]]
-                elif "accounts" in st.secrets:
-                    for idx, s_acc in enumerate(st.secrets["accounts"]):
-                        acc_id = s_acc.get("id", idx + 1)
-                        matched = next((a for a in cfg["accounts"] if a["id"] == acc_id), None)
-                        key_val = s_acc.get("api_key") or s_acc.get("session_key", "")
-                        if matched:
-                            if key_val:
-                                matched["api_key"] = key_val
-                        else:
-                            new_entry = dict(s_acc)
-                            new_entry["api_key"] = key_val
-                            cfg["accounts"].append(new_entry)
+            for k in st.secrets:
+                out[k] = st.secrets[k]
+            return out
         except Exception:
             pass
+    # Fallback: environment variables
+    for k in ["MODEL_PROVIDER", "SESSION_KEY_1", "SESSION_KEY_2",
+              "SESSION_KEY_3", "SESSION_KEY_4",
+              "TAPIR_CONV_1", "TAPIR_CONV_2", "TAPIR_CONV_3", "TAPIR_CONV_4"]:
+        v = os.environ.get(k)
+        if v:
+            out[k] = v
+    return out
 
-        return cfg
 
-    def _load_state(self) -> dict:
-        if os.path.exists(self.state_path):
-            try:
-                with open(self.state_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                pass
+class AccountNode:
+    """Representasi satu akun Claude dalam pool."""
 
-        default_state = {"accounts": {}, "current_account_id": 1}
-        for acc in self.config.get("accounts", []):
-            acc_id = str(acc["id"])
-            default_state["accounts"][acc_id] = {
-                "id": acc["id"],
-                "name": acc.get("name", f"Key #{acc['id']}"),
-                "status": "ready",
-                "available_at": 0,
-                "cooldown_until_str": "",
-                "last_used": 0,
-                "total_tasks": 0,
+    def __init__(self, data: dict):
+        self.id: str           = data.get("id", "")
+        self.label: str        = data.get("label", self.id)
+        self.session_key: str  = data.get("session_key", "")
+        self.conv_id: str      = data.get("tapir_conv_id", data.get("conv_id", ""))
+        self.org_id: Optional[str] = data.get("org_id", None)
+
+        self.status: str       = STATUS_READY if self.session_key else STATUS_ERROR
+        self.cooldown_until: float = 0.0
+        self.total_sent: int   = data.get("total_sent", 0)
+        self.last_response: str = ""
+        self.error_msg: str    = ""
+        self._lock             = threading.Lock()
+
+    @property
+    def is_ready(self) -> bool:
+        if self.status == STATUS_COOLDOWN:
+            if time.time() >= self.cooldown_until:
+                self.status = STATUS_READY
+        return self.status == STATUS_READY and bool(self.session_key)
+
+    @property
+    def cooldown_remaining(self) -> int:
+        """Sisa cooldown dalam detik."""
+        if self.status != STATUS_COOLDOWN:
+            return 0
+        return max(0, int(self.cooldown_until - time.time()))
+
+    def mark_working(self):
+        with self._lock:
+            self.status = STATUS_WORKING
+
+    def mark_ready(self):
+        with self._lock:
+            self.status = STATUS_READY
+            self.error_msg = ""
+
+    def mark_cooldown(self):
+        with self._lock:
+            self.status = STATUS_COOLDOWN
+            self.cooldown_until = time.time() + COOLDOWN_SECONDS
+
+    def mark_error(self, msg: str = ""):
+        with self._lock:
+            self.status = STATUS_ERROR
+            self.error_msg = msg
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "session_key": self.session_key,
+            "tapir_conv_id": self.conv_id,
+            "org_id": self.org_id,
+            "status": self.status,
+            "cooldown_remaining": self.cooldown_remaining,
+            "total_sent": self.total_sent,
+            "last_response": self.last_response[-200:] if self.last_response else "",
+            "error_msg": self.error_msg,
+        }
+
+
+class ClusterPool:
+    """
+    Pool manager untuk rotasi akun Claude free web.
+    Thread-safe. Mendukung Streamlit Cloud via st.secrets.
+    """
+
+    CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config.json")
+
+    def __init__(self):
+        self._lock   = threading.Lock()
+        self.nodes: List[AccountNode] = []
+        self.current_index: int = 0
+        self.model_provider: str = "claude_web"
+        self._load_config()
+
+    # ------------------------------------------------------------------
+    # Config loading
+    # ------------------------------------------------------------------
+
+    def _load_config(self):
+        """Load config.json lalu inject secrets dari Streamlit."""
+        config = self._read_config_file()
+        secrets = _load_secrets()
+
+        self.model_provider = secrets.get("MODEL_PROVIDER", "claude_web")
+
+        accounts_raw: List[dict] = config.get("accounts", [])
+
+        # Inject session keys & conv IDs dari secrets
+        for i, acc in enumerate(accounts_raw, start=1):
+            sk  = secrets.get(f"SESSION_KEY_{i}", acc.get("session_key", ""))
+            cid = secrets.get(f"TAPIR_CONV_{i}", acc.get("tapir_conv_id", acc.get("conv_id", "")))
+            if sk:
+                acc["session_key"]  = sk
+            if cid:
+                acc["tapir_conv_id"] = cid
+
+        self.nodes = [AccountNode(a) for a in accounts_raw]
+
+    def _read_config_file(self) -> dict:
+        try:
+            path = self.CONFIG_PATH
+            if not os.path.exists(path):
+                # Fallback: cari config.json di direktori kerja
+                path = "config.json"
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            # Default kosong — semua akan diisi dari secrets
+            return {
+                "accounts": [
+                    {"id": f"akun{i}", "label": f"Akun {i}", "session_key": "", "tapir_conv_id": ""}
+                    for i in range(1, 5)
+                ]
             }
-        return default_state
 
-    def save_state(self):
+    def reload(self):
+        """Reload config (e.g., setelah user update secrets)."""
         with self._lock:
-            try:
-                with open(self.state_path, "w", encoding="utf-8") as f:
-                    json.dump(self.state, f, indent=2)
-            except Exception:
-                pass
+            self._load_config()
 
-    def save_config(self):
+    # ------------------------------------------------------------------
+    # Node selection
+    # ------------------------------------------------------------------
+
+    def get_ready_node(self) -> Optional[AccountNode]:
+        """Round-robin pilih node yang ready. Return None jika semua cooldown/error."""
         with self._lock:
-            try:
-                with open(self.config_path, "w", encoding="utf-8") as f:
-                    json.dump(self.config, f, indent=2)
-            except Exception:
-                pass
-
-    def refresh_statuses(self):
-        now = time.time()
-        with self._lock:
-            for acc_id, acc in self.state.get("accounts", {}).items():
-                if acc.get("status") == "rate_limited":
-                    if now >= acc.get("available_at", 0):
-                        acc["status"] = "ready"
-                        acc["available_at"] = 0
-                        acc["cooldown_until_str"] = ""
-        self.save_state()
-
-    def get_available_account(self) -> Optional[dict]:
-        self.refresh_statuses()
-        accounts = self.config.get("accounts", [])
-        if not accounts:
+            n = len(self.nodes)
+            for _ in range(n):
+                node = self.nodes[self.current_index % n]
+                self.current_index = (self.current_index + 1) % n
+                if node.is_ready:
+                    return node
             return None
 
-        start_id = self.state.get("current_account_id", 1)
-        acc_ids = [acc["id"] for acc in accounts]
-
-        if start_id in acc_ids:
-            idx = acc_ids.index(start_id)
-            ordered_ids = acc_ids[idx:] + acc_ids[:idx]
-        else:
-            ordered_ids = acc_ids
-
-        for aid in ordered_ids:
-            acc_state = self.state.get("accounts", {}).get(str(aid), {})
-            if acc_state.get("status") == "ready":
-                conf = next((a for a in accounts if a["id"] == aid), None)
-                key_val = conf.get("api_key") or conf.get("session_key") if conf else None
-                if conf and key_val:
-                    self.state["current_account_id"] = aid
-                    self.save_state()
-                    res = {**conf, **acc_state}
-                    res["api_key"] = key_val
-                    return res
-
+    def get_node_by_id(self, node_id: str) -> Optional[AccountNode]:
+        for node in self.nodes:
+            if node.id == node_id:
+                return node
         return None
 
-    def mark_rate_limited(self, account_id: int, reset_seconds: Optional[int] = None):
-        now = time.time()
-        duration = reset_seconds if reset_seconds else 3600
-        cooldown_until = now + duration
-        cooldown_str = (datetime.now() + timedelta(seconds=duration)).strftime("%Y-%m-%d %H:%M:%S")
+    # ------------------------------------------------------------------
+    # Status
+    # ------------------------------------------------------------------
 
-        acc_id_str = str(account_id)
-        with self._lock:
-            if acc_id_str in self.state.get("accounts", {}):
-                acc = self.state["accounts"][acc_id_str]
-                acc["status"] = "rate_limited"
-                acc["available_at"] = cooldown_until
-                acc["cooldown_until_str"] = cooldown_str
+    def get_status(self) -> Dict[str, Any]:
+        ready    = [n for n in self.nodes if n.is_ready]
+        cooldown = [n for n in self.nodes if n.status == STATUS_COOLDOWN]
+        working  = [n for n in self.nodes if n.status == STATUS_WORKING]
+        error    = [n for n in self.nodes if n.status == STATUS_ERROR]
 
-            accounts = self.config.get("accounts", [])
-            acc_ids = [a["id"] for a in accounts]
-            if account_id in acc_ids:
-                idx = acc_ids.index(account_id)
-                next_idx = (idx + 1) % len(acc_ids)
-                self.state["current_account_id"] = acc_ids[next_idx]
+        return {
+            "total":    len(self.nodes),
+            "ready":    len(ready),
+            "working":  len(working),
+            "cooldown": len(cooldown),
+            "error":    len(error),
+            "nodes":    [n.to_dict() for n in self.nodes],
+            "provider": self.model_provider,
+        }
 
-        self.save_state()
+    def all_exhausted(self) -> bool:
+        return all(not n.is_ready for n in self.nodes)
 
-    def record_task_success(self, account_id: int):
-        acc_id_str = str(account_id)
-        with self._lock:
-            if acc_id_str in self.state.get("accounts", {}):
-                acc = self.state["accounts"][acc_id_str]
-                acc["last_used"] = time.time()
-                acc["total_tasks"] = acc.get("total_tasks", 0) + 1
-        self.save_state()
-
-    def get_status_summary(self) -> List[dict]:
-        self.refresh_statuses()
-        summary = []
-        now = time.time()
-        for acc_conf in self.config.get("accounts", []):
-            aid = str(acc_conf["id"])
-            s = self.state.get("accounts", {}).get(aid, {})
-            status = s.get("status", "ready")
-            wait_str = "-"
-            has_key = bool(acc_conf.get("api_key") or acc_conf.get("session_key"))
-
-            if not has_key:
-                display_status = "NO_KEY"
-            elif status == "rate_limited":
-                display_status = "RATE_LIMITED"
-                remaining = max(0, int(s.get("available_at", 0) - now))
-                minutes = max(1, remaining // 60)
-                wait_str = f"{minutes}m left"
-            else:
-                display_status = "READY"
-
-            summary.append({
-                "id": acc_conf["id"],
-                "name": acc_conf.get("name"),
-                "has_key": has_key,
-                "status": display_status,
-                "cooldown": wait_str,
-                "total_tasks": s.get("total_tasks", 0),
-            })
-        return summary
+    def min_cooldown_remaining(self) -> int:
+        cd_nodes = [n for n in self.nodes if n.status == STATUS_COOLDOWN]
+        if not cd_nodes:
+            return 0
+        return min(n.cooldown_remaining for n in cd_nodes)
