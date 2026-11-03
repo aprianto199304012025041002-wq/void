@@ -1,6 +1,6 @@
 """
 AI Client Engine — Google Gemini & Groq REST APIs
-Mendukung multi-turn conversation memory, dynamic model switching,
+Mendukung multi-turn conversation memory, auto-model fallback (503/404 handling),
 dan deteksi Rate Limit (429) untuk auto-failover antar akun/key.
 """
 
@@ -32,18 +32,20 @@ class BaseAIClient:
 # Google Gemini Client (Official v1beta REST)
 # ────────────────────────────────────────────────────────────────
 class GeminiClient(BaseAIClient):
-    """
-    Client resmi Google Gemini API via REST.
-    Tahan banting, ringan, tidak ada masalah versi package.
-    """
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+    FALLBACK_MODELS = [
+        "gemini-3-flash-preview",
+        "gemini-3.8-flash",
+        "gemini-3.5-flash",
+        "gemini-flash-latest"
+    ]
 
-    def __init__(self, api_key: str, model: str = "gemini-2.0-flash"):
+    def __init__(self, api_key: str, model: str = "gemini-3-flash-preview"):
         self.api_key = api_key
-        self.model = model or "gemini-2.0-flash"
+        # Jika model default adalah gemini-3.8-flash atau gemini-2.0, map ke model aktif
+        self.model = model or "gemini-3-flash-preview"
 
     def _convert_history(self, history: List[Dict[str, str]], prompt: str) -> List[dict]:
-        """Konversi riwayat format standar [{role, content}] ke format Gemini contents."""
         contents = []
         for msg in history:
             role = "user" if msg["role"] == "user" else "model"
@@ -58,9 +60,7 @@ class GeminiClient(BaseAIClient):
         return contents
 
     def send_chat(self, history: List[Dict[str, str]], prompt: str) -> str:
-        url = f"{self.BASE_URL}/{self.model}:generateContent?key={self.api_key}"
         contents = self._convert_history(history, prompt)
-        
         payload = {
             "contents": contents,
             "generationConfig": {
@@ -69,40 +69,47 @@ class GeminiClient(BaseAIClient):
             }
         }
 
-        try:
-            resp = requests.post(url, json=payload, timeout=90)
-        except Exception as e:
-            raise AIAuthError(f"Gagal koneksi ke Gemini API: {e}")
+        # Coba model utama, jika 503 / 404 coba fallback
+        models_to_try = [self.model] + [m for m in self.FALLBACK_MODELS if m != self.model]
 
-        if resp.status_code == 429:
-            raise AIRateLimitError("Gemini Quota Exceeded (429). Butuh cooldown atau ganti key.")
-        if resp.status_code in (400, 401, 403):
-            err_msg = resp.text
+        last_error = ""
+        for m in models_to_try:
+            url = f"{self.BASE_URL}/{m}:generateContent?key={self.api_key}"
             try:
-                err_msg = resp.json().get("error", {}).get("message", resp.text)
-            except Exception:
-                pass
-            raise AIAuthError(f"Gemini Auth Error ({resp.status_code}): {err_msg}")
-        if resp.status_code != 200:
-            raise Exception(f"Gemini HTTP {resp.status_code}: {resp.text[:300]}")
+                resp = requests.post(url, json=payload, timeout=60)
+            except Exception as e:
+                raise AIAuthError(f"Koneksi gagal ke Gemini: {e}")
 
-        data = resp.json()
-        try:
-            candidates = data.get("candidates", [])
-            if not candidates:
-                # Periksa finishReason atau promptFeedback
-                fb = data.get("promptFeedback", {})
-                return f"[No candidate returned. Feedback: {fb}]"
-            parts = candidates[0].get("content", {}).get("parts", [])
-            text = "".join(p.get("text", "") for p in parts)
-            return text
-        except Exception as e:
-            raise Exception(f"Gagal parsing respons Gemini: {e}")
+            if resp.status_code == 200:
+                self.model = m  # Simpan model yang sukses
+                data = resp.json()
+                try:
+                    candidates = data.get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        return "".join(p.get("text", "") for p in parts)
+                    fb = data.get("promptFeedback", {})
+                    return f"[Feedback: {fb}]"
+                except Exception as e:
+                    raise Exception(f"Gagal parse JSON Gemini: {e}")
+
+            elif resp.status_code == 429:
+                raise AIRateLimitError("Gemini Quota Exceeded (429).")
+            elif resp.status_code in (401, 403):
+                raise AIAuthError(f"Gemini Auth Gagal ({resp.status_code}): {resp.text[:200]}")
+            elif resp.status_code in (404, 503):
+                last_error = f"Model {m} status {resp.status_code}"
+                continue
+            else:
+                last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                break
+
+        raise Exception(f"Semua model Gemini gagal: {last_error}")
 
     def test_connection(self) -> Tuple[bool, str]:
         url = f"{self.BASE_URL}/{self.model}:generateContent?key={self.api_key}"
         payload = {
-            "contents": [{"role": "user", "parts": [{"text": "Ping test: balas dengan kata OK"}]}]
+            "contents": [{"role": "user", "parts": [{"text": "ping"}]}]
         }
         try:
             resp = requests.post(url, json=payload, timeout=15)
@@ -111,19 +118,22 @@ class GeminiClient(BaseAIClient):
             elif resp.status_code == 429:
                 return False, "⏳ Rate Limited (429)"
             else:
-                return False, f"❌ Error {resp.status_code}: {resp.text[:100]}"
+                # Coba fallback
+                for fb in self.FALLBACK_MODELS:
+                    u2 = f"{self.BASE_URL}/{fb}:generateContent?key={self.api_key}"
+                    r2 = requests.post(u2, json=payload, timeout=10)
+                    if r2.status_code == 200:
+                        self.model = fb
+                        return True, f"✅ Gemini OK ({fb})"
+                return False, f"❌ Error {resp.status_code}: {resp.text[:120]}"
         except Exception as e:
-            return False, f"❌ Connection Error: {e}"
+            return False, f"❌ Koneksi Error: {e}"
 
 
 # ────────────────────────────────────────────────────────────────
 # Groq Client (Official OpenAI-Compatible REST)
 # ────────────────────────────────────────────────────────────────
 class GroqClient(BaseAIClient):
-    """
-    Client resmi Groq Cloud API via OpenAI-compatible endpoint.
-    Super cepat (Llama 3.3 70B, Llama 3.1 8B).
-    """
     BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
 
     def __init__(self, api_key: str, model: str = "llama-3.3-70b-versatile"):
@@ -149,17 +159,12 @@ class GroqClient(BaseAIClient):
         try:
             resp = requests.post(self.BASE_URL, headers=headers, json=payload, timeout=90)
         except Exception as e:
-            raise AIAuthError(f"Gagal koneksi ke Groq API: {e}")
+            raise AIAuthError(f"Gagal koneksi ke Groq: {e}")
 
         if resp.status_code == 429:
-            raise AIRateLimitError("Groq Rate Limit Reached (429 TPM/RPM). Auto-rotating node...")
+            raise AIRateLimitError("Groq Rate Limit Reached (429 TPM/RPM).")
         if resp.status_code in (401, 403):
-            err_msg = resp.text
-            try:
-                err_msg = resp.json().get("error", {}).get("message", resp.text)
-            except Exception:
-                pass
-            raise AIAuthError(f"Groq Auth Error ({resp.status_code}): {err_msg}")
+            raise AIAuthError(f"Groq Auth Error ({resp.status_code}): {resp.text[:200]}")
         if resp.status_code != 200:
             raise Exception(f"Groq HTTP {resp.status_code}: {resp.text[:300]}")
 
@@ -167,7 +172,7 @@ class GroqClient(BaseAIClient):
         try:
             return data["choices"][0]["message"]["content"]
         except Exception as e:
-            raise Exception(f"Gagal parsing respons Groq: {e}")
+            raise Exception(f"Gagal parse respons Groq: {e}")
 
     def test_connection(self) -> Tuple[bool, str]:
         headers = {
@@ -176,8 +181,8 @@ class GroqClient(BaseAIClient):
         }
         payload = {
             "model": self.model,
-            "messages": [{"role": "user", "content": "Ping: say PONG"}],
-            "max_tokens": 10
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 5
         }
         try:
             resp = requests.post(self.BASE_URL, headers=headers, json=payload, timeout=15)
@@ -186,18 +191,14 @@ class GroqClient(BaseAIClient):
             elif resp.status_code == 429:
                 return False, "⏳ Groq Rate Limited (429)"
             else:
-                return False, f"❌ Groq Error {resp.status_code}: {resp.text[:100]}"
+                return False, f"❌ Groq Error {resp.status_code}: {resp.text[:120]}"
         except Exception as e:
-            return False, f"❌ Connection Error: {e}"
+            return False, f"❌ Koneksi Error: {e}"
 
 
 def get_ai_client(provider: str, api_key: str, model: Optional[str] = None) -> BaseAIClient:
-    """Factory helper untuk instansiasi AI client sesuai provider."""
     provider_lower = (provider or "").strip().lower()
     if "groq" in provider_lower:
-        default_model = model or "llama-3.3-70b-versatile"
-        return GroqClient(api_key=api_key, model=default_model)
+        return GroqClient(api_key=api_key, model=model or "llama-3.3-70b-versatile")
     else:
-        # Default: Gemini
-        default_model = model or "gemini-2.0-flash"
-        return GeminiClient(api_key=api_key, model=default_model)
+        return GeminiClient(api_key=api_key, model=model or "gemini-3-flash-preview")
