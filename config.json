@@ -1,36 +1,5 @@
 {
-  "accounts": [
-    {
-      "id": "akun1",
-      "label": "Akun 1",
-      "session_key": "",
-      "tapir_conv_id": "f51cbb3c-8d7e-455e-8598-236271016a47",
-      "org_id": null,
-      "total_sent": 0
-    },
-    {
-      "id": "akun2",
-      "label": "Akun 2",
-      "session_key": "",
-      "tapir_conv_id": "930c7ed1-62a8-475d-9a87-f22df858cde2",
-      "org_id": null,
-      "total_sent": 0
-    },
-    {
-      "id": "akun3",
-      "label": "Akun 3",
-      "session_key": "",
-      "tapir_conv_id": "03c28d45-23fe-4a5c-a08c-58d5511c268a",
-      "org_id": null,
-      "total_sent": 0
-    },
-    {
-      "id": "akun4",
-      "label": "Akun 4",
-      "session_key": "",
-      "tapir_conv_id": "f898f5a0-427c-4c3e-bad6-0c2955b986b5",
-      "org_id": null,
-      "total_sent": 0
-    }
-  ]
+  "provider": "gemini",
+  "gemini_model": "gemini-3-flash-preview",
+  "groq_model": "llama-3.3-70b-versatile"
 }
