@@ -1,6 +1,7 @@
 """
 Autonomous Continuous Bug Hunter Dashboard
 Audit repositori GitHub secara terus-menerus dan catat bug ke file Markdown (.md).
+Terintegrasi Auto-Sync ke GitHub Branch 'audit-reports' (Anti-Hilang Selamanya).
 """
 
 import sys
@@ -15,7 +16,7 @@ import streamlit as st
 
 from ui.auth import check_auth
 from ui.styles import inject_css
-from ui.components import render_telemetry_header, render_node_cards, render_terminal
+from ui.components import render_node_cards, render_terminal
 
 from src.worker import (
     get_pool, get_stats, get_logs,
@@ -66,7 +67,6 @@ tab_ctrl, tab_report, tab_console, tab_vault = st.tabs(
 with tab_ctrl:
     st.markdown("#### 🎯 Konfigurasi Target Repositori GitHub")
 
-    # Auto-load target dari st.secrets jika ada
     sec = getattr(st, "secrets", {})
     default_target_repo = sec.get("TARGET_REPO", "aprianto199304012025041002-wq/void")
     default_target_pat = sec.get("TARGET_GITHUB_PAT", sec.get("GITHUB_PAT", ""))
@@ -123,10 +123,15 @@ with tab_ctrl:
                     st.rerun()
 
     st.markdown("---")
-    st.markdown("#### ⚡ AI Engine Status")
+    st.markdown("#### ⚡ AI Engine Status & Persistence")
     render_node_cards(status["nodes"])
-    if wstats.get("current_file"):
-        st.caption(f"📂 File saat ini: `{wstats.get('current_file')}` | AI Provider: **{status['provider'].upper()}** (`{status['model']}`)")
+    
+    col_inf1, col_inf2 = st.columns(2)
+    with col_inf1:
+        if wstats.get("current_file"):
+            st.caption(f"📂 File saat ini: `{wstats.get('current_file')}` | AI: **{status['provider'].upper()}** (`{status['model']}`)")
+    with col_inf2:
+        st.caption(f"☁️ **GitHub Cloud Auto-Sync:** Aktif ke branch `audit-reports` | Last Sync: `{wstats.get('last_github_sync')}`")
 
 # ══════════════════════════════════════════════════════════════
 # TAB 2: BUG REPORT (.MD)
@@ -134,21 +139,23 @@ with tab_ctrl:
 with tab_report:
     report_md = get_bug_report_markdown()
     
-    col_r1, col_r2 = st.columns([3, 1])
+    col_r1, col_r2, col_r3 = st.columns([2, 1, 1])
     with col_r1:
         st.markdown("### 📋 Laporan Bug Terdeteksi (Markdown)")
     with col_r2:
         st.download_button(
-            "📥 Unduh Laporan (bug_report.md)",
+            "📥 Unduh bug_report.md",
             data=report_md,
             file_name="bug_report.md",
             mime="text/markdown",
             use_container_width=True,
         )
+    with col_r3:
         if st.button("🧹 Reset Laporan", use_container_width=True):
             clear_bug_reports()
             st.rerun()
 
+    st.info("☁️ Laporan ini secara otomatis disinkronkan ke branch `audit-reports` di GitHub Anda. Data tetap aman dan tidak akan hilang meskipun server di-reboot.")
     st.markdown(report_md)
 
 # ══════════════════════════════════════════════════════════════
@@ -188,19 +195,6 @@ with tab_vault:
                 c = GeminiClient(api_key=gemini_test_key, model=gemini_test_model)
                 ok, msg = c.test_connection()
                 st.success(msg) if ok else st.error(msg)
-
-    st.markdown("---")
-    st.markdown("#### 📋 Konfigurasi Streamlit Secrets untuk Bug Hunter")
-    st.code("""pw = "zxcvbnm3142"
-
-MODEL_PROVIDER = "groq"
-GROQ_API_KEY = "gsk_..."
-GROQ_MODEL = "qwen/qwen3.8-27b"
-
-# (Opsional) Target Repo default & Read-only GitHub PAT
-TARGET_REPO = "owner/repo"
-TARGET_GITHUB_PAT = "github_pat_read_only_anda"
-""", language="toml")
 
 # ── Auto-refresh saat daemon aktif ───────────────────────────
 if is_bug_hunter_running():
