@@ -60,8 +60,8 @@ with tab_ctrl:
 
     with col_b:
         interval = st.number_input(
-            "Interval (detik)", min_value=15, max_value=3600,
-            value=60, step=5, key="interval_input",
+            "Interval (detik)", min_value=10, max_value=3600,
+            value=30, step=5, key="interval_input",
             help="Jeda waktu antar eksekusi sukses"
         )
 
@@ -118,7 +118,6 @@ with tab_feed:
         if not history:
             st.info("Belum ada riwayat percakapan aktif. Kirim pesan untuk memulai.")
         else:
-            # Tampilkan 10 pesan terakhir
             for msg in history[-10:]:
                 role = "🧑 User" if msg["role"] == "user" else "🤖 AI"
                 with st.chat_message("user" if msg["role"] == "user" else "assistant"):
@@ -131,70 +130,45 @@ with tab_feed:
 with tab_vault:
     st.markdown("### 🔑 Quick Diagnostic & Key Test")
     st.info(
-        "Anda dapat mengetes API Key secara langsung dari sini, "
-        "atau simpan secara permanen di **Streamlit Cloud Settings → Secrets**.",
+        "API Key telah terbaca dari **Streamlit Cloud Secrets**. "
+        "Anda dapat melakukan Ping Test untuk memastikan koneksi aktif.",
         icon="ℹ️"
     )
 
-    t_gemini, t_groq = st.tabs(["Google Gemini", "Groq Cloud"])
-
-    with t_gemini:
-        gemini_test_key = st.text_input("Gemini API Key", type="password", key="vault_gemini_key",
-                                        placeholder="AIzaSy... atau AQ...")
-        gemini_test_model = st.selectbox("Model", ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"], key="vault_gemini_model")
-        if st.button("🔌 Ping Test Gemini"):
-            if not gemini_test_key:
-                st.warning("Masukkan Gemini API Key terlebih dahulu.")
-            else:
-                with st.spinner("Menguji koneksi ke Google Gemini API..."):
-                    c = GeminiClient(api_key=gemini_test_key, model=gemini_test_model)
-                    ok, msg = c.test_connection()
-                    if ok:
-                        st.success(msg)
-                    else:
-                        st.error(msg)
+    t_groq, t_gemini = st.tabs(["Groq Cloud (Aktif)", "Google Gemini"])
 
     with t_groq:
-        groq_test_key = st.text_input("Groq API Key", type="password", key="vault_groq_key",
-                                      placeholder="gsk_...")
-        groq_test_model = st.selectbox("Model", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"], key="vault_groq_model")
+        groq_test_model = st.selectbox("Model Groq", ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"], key="vault_groq_model")
         if st.button("🔌 Ping Test Groq"):
-            if not groq_test_key:
-                st.warning("Masukkan Groq API Key terlebih dahulu.")
+            # Ambil key dari pool node jika ada
+            groq_node = next((n for n in pool.nodes if n.provider == "groq"), None)
+            groq_k = groq_node.api_key if groq_node else ""
+            if not groq_k:
+                st.warning("Groq API Key tidak ditemukan di secrets.")
             else:
                 with st.spinner("Menguji koneksi ke Groq Cloud API..."):
-                    c = GroqClient(api_key=groq_test_key, model=groq_test_model)
+                    c = GroqClient(api_key=groq_k, model=groq_test_model)
                     ok, msg = c.test_connection()
                     if ok:
                         st.success(msg)
                     else:
                         st.error(msg)
 
-    st.markdown("---")
-    st.markdown("#### 📋 Format `st.secrets` di Streamlit Cloud")
-    st.markdown("Salin contoh template berikut ke **Streamlit Cloud Dashboard → Settings → Secrets**:")
-
-    st.code("""pw = "zxcvbnm3142"
-
-# Pilih provider: "gemini" atau "groq"
-MODEL_PROVIDER = "groq"
-
-# ── Konfigurasi GROQ (Llama 3.3 70B gratis) ──
-GROQ_MODEL = "llama-3.3-70b-versatile"
-# Single key:
-GROQ_API_KEY = "gsk_xxxxxxx"
-# Atau Multi-key pooling (jika punya beberapa key):
-# GROQ_API_KEY_1 = "gsk_xxxxxxx1"
-# GROQ_API_KEY_2 = "gsk_xxxxxxx2"
-
-# ── Konfigurasi Google GEMINI ──
-GEMINI_MODEL = "gemini-2.0-flash"
-# Single key:
-GEMINI_API_KEY = "AQ.xxxxxxx"
-# Atau Multi-key pooling:
-# GEMINI_API_KEY_1 = "AQ.xxxxxxx1"
-# GEMINI_API_KEY_2 = "AQ.xxxxxxx2"
-""", language="toml")
+    with t_gemini:
+        gemini_test_model = st.selectbox("Model Gemini", ["gemini-3-flash-preview", "gemini-3.8-flash", "gemini-3.5-flash"], key="vault_gemini_model")
+        if st.button("🔌 Ping Test Gemini"):
+            gemini_node = next((n for n in pool.nodes if n.provider == "gemini"), None)
+            gemini_k = gemini_node.api_key if gemini_node else ""
+            if not gemini_k:
+                st.warning("Gemini API Key tidak ditemukan di secrets.")
+            else:
+                with st.spinner("Menguji koneksi ke Google Gemini API..."):
+                    c = GeminiClient(api_key=gemini_k, model=gemini_test_model)
+                    ok, msg = c.test_connection()
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
 
 # ══════════════════════════════════════════════════════════════
 # TAB 4: CONFIG
@@ -206,15 +180,15 @@ with tab_cfg:
     with col_cfg1:
         sel_prov = st.selectbox(
             "Ganti Provider Aktif",
-            ["gemini", "groq"],
-            index=0 if status["provider"] == "gemini" else 1,
+            ["groq", "gemini"],
+            index=0 if status["provider"] == "groq" else 1,
             key="cfg_provider_sel"
         )
     with col_cfg2:
         if sel_prov == "gemini":
-            models_avail = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+            models_avail = ["gemini-3-flash-preview", "gemini-3.8-flash", "gemini-3.5-flash"]
         else:
-            models_avail = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
+            models_avail = ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"]
 
         sel_model = st.selectbox("Pilih Model", models_avail, key="cfg_model_sel")
 
