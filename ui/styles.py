@@ -1,4 +1,4 @@
-"""
+﻿"""
 Cyberpunk Ultra-Compact High-Density CSS with Mobile Portrait Optimization.
 """
 
@@ -207,3 +207,8 @@ def inject_styles():
     }
     </style>
     """, unsafe_allow_html=True)
+
+
+# Alias
+inject_css = inject_styles
+
