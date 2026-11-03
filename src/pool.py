@@ -36,7 +36,7 @@ def _read_config_file() -> dict:
     return {}
 
 
-def _load_all_secrets() -> dict:
+def load_all_secrets() -> dict:
     out = _read_config_file()
     if _HAS_ST:
         try:
@@ -120,20 +120,22 @@ class ClusterPool:
         self._lock = threading.Lock()
         self.nodes: List[KeyNode] = []
         self.current_index: int = 0
-        self.active_provider: str = "gemini"
-        self.active_model: str = "gemini-3-flash-preview"
+        self.active_provider: str = "groq"
+        self.active_model: str = "qwen/qwen3.8-27b"
+        self.secrets_cache: dict = {}
         self._load_nodes()
 
     def _load_nodes(self):
-        secrets = _load_all_secrets()
+        secrets = load_all_secrets()
+        self.secrets_cache = secrets
         
-        provider = secrets.get("MODEL_PROVIDER", secrets.get("provider", "gemini")).lower()
+        provider = secrets.get("MODEL_PROVIDER", secrets.get("provider", "groq")).lower()
         self.active_provider = "groq" if "groq" in provider else "gemini"
 
         nodes: List[KeyNode] = []
 
         if self.active_provider == "groq":
-            self.active_model = secrets.get("GROQ_MODEL", secrets.get("groq_model", "llama-3.3-70b-versatile"))
+            self.active_model = secrets.get("GROQ_MODEL", secrets.get("groq_model", "qwen/qwen3.8-27b"))
             multi_keys = []
             for i in range(1, 9):
                 k = secrets.get(f"GROQ_API_KEY_{i}")
@@ -149,7 +151,6 @@ class ClusterPool:
 
         else: # Gemini
             self.active_model = secrets.get("GEMINI_MODEL", secrets.get("gemini_model", "gemini-3-flash-preview"))
-            
             multi_keys = []
             for i in range(1, 9):
                 k = secrets.get(f"GEMINI_API_KEY_{i}")
@@ -165,6 +166,15 @@ class ClusterPool:
 
         self.nodes = nodes
 
+    def get_api_key_for(self, provider: str) -> str:
+        """Mengambil API key untuk provider tertentu langsung dari secrets."""
+        p = provider.lower()
+        sec = self.secrets_cache or load_all_secrets()
+        if "groq" in p:
+            return sec.get("GROQ_API_KEY", sec.get("GROQ_API_KEY_1", ""))
+        else:
+            return sec.get("GEMINI_API_KEY", sec.get("GEMINI_API_KEY_1", ""))
+
     def reload(self):
         with self._lock:
             self._load_nodes()
@@ -173,6 +183,12 @@ class ClusterPool:
         with self._lock:
             self.active_provider = provider
             self.active_model = model
+            # Update secrets_cache sementara
+            self.secrets_cache["MODEL_PROVIDER"] = provider
+            if provider == "groq":
+                self.secrets_cache["GROQ_MODEL"] = model
+            else:
+                self.secrets_cache["GEMINI_MODEL"] = model
             self._load_nodes()
 
     def get_ready_node(self) -> Optional[KeyNode]:
