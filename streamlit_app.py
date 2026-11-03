@@ -130,24 +130,33 @@ with tab_feed:
 with tab_vault:
     st.markdown("### 🔑 Quick Diagnostic & Key Test")
     st.info(
-        "API Key telah terbaca dari **Streamlit Cloud Secrets**. "
-        "Anda dapat melakukan Ping Test untuk memastikan koneksi aktif.",
+        "Kunci API dibaca langsung dari **Streamlit Cloud Secrets**. "
+        "Uji koneksi ke masing-masing provider secara instan di bawah ini:",
         icon="ℹ️"
     )
 
-    t_groq, t_gemini = st.tabs(["Groq Cloud (Aktif)", "Google Gemini"])
+    t_groq, t_gemini = st.tabs(["⚡ Groq Cloud", "🌐 Google Gemini"])
 
     with t_groq:
-        groq_test_model = st.selectbox("Model Groq", ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"], key="vault_groq_model")
+        stored_groq_key = pool.get_api_key_for("groq")
+        groq_test_key = st.text_input(
+            "Groq API Key", 
+            value=stored_groq_key, 
+            type="password", 
+            key="vault_groq_key",
+            help="Otomatis diambil dari st.secrets['GROQ_API_KEY'] jika ada."
+        )
+        groq_test_model = st.selectbox(
+            "Model Groq", 
+            ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"], 
+            key="vault_groq_model"
+        )
         if st.button("🔌 Ping Test Groq"):
-            # Ambil key dari pool node jika ada
-            groq_node = next((n for n in pool.nodes if n.provider == "groq"), None)
-            groq_k = groq_node.api_key if groq_node else ""
-            if not groq_k:
-                st.warning("Groq API Key tidak ditemukan di secrets.")
+            if not groq_test_key:
+                st.warning("Groq API Key tidak ditemukan. Pastikan sudah diisi di secrets atau di input ini.")
             else:
                 with st.spinner("Menguji koneksi ke Groq Cloud API..."):
-                    c = GroqClient(api_key=groq_k, model=groq_test_model)
+                    c = GroqClient(api_key=groq_test_key, model=groq_test_model)
                     ok, msg = c.test_connection()
                     if ok:
                         st.success(msg)
@@ -155,15 +164,25 @@ with tab_vault:
                         st.error(msg)
 
     with t_gemini:
-        gemini_test_model = st.selectbox("Model Gemini", ["gemini-3-flash-preview", "gemini-3.8-flash", "gemini-3.5-flash"], key="vault_gemini_model")
+        stored_gemini_key = pool.get_api_key_for("gemini")
+        gemini_test_key = st.text_input(
+            "Gemini API Key", 
+            value=stored_gemini_key, 
+            type="password", 
+            key="vault_gemini_key",
+            help="Otomatis diambil dari st.secrets['GEMINI_API_KEY'] jika ada."
+        )
+        gemini_test_model = st.selectbox(
+            "Model Gemini", 
+            ["gemini-3-flash-preview", "gemini-3.8-flash", "gemini-3.5-flash"], 
+            key="vault_gemini_model"
+        )
         if st.button("🔌 Ping Test Gemini"):
-            gemini_node = next((n for n in pool.nodes if n.provider == "gemini"), None)
-            gemini_k = gemini_node.api_key if gemini_node else ""
-            if not gemini_k:
-                st.warning("Gemini API Key tidak ditemukan di secrets.")
+            if not gemini_test_key:
+                st.warning("Gemini API Key tidak ditemukan. Pastikan sudah diisi di secrets atau di input ini.")
             else:
                 with st.spinner("Menguji koneksi ke Google Gemini API..."):
-                    c = GeminiClient(api_key=gemini_k, model=gemini_test_model)
+                    c = GeminiClient(api_key=gemini_test_key, model=gemini_test_model)
                     ok, msg = c.test_connection()
                     if ok:
                         st.success(msg)
