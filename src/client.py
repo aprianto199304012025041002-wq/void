@@ -1,13 +1,16 @@
 """
 AI Client Engine — Google Gemini & Groq REST APIs
+Menggunakan Python Standard Library (urllib) + fallback requests.
 Mendukung multi-turn conversation memory, auto-model fallback (503/404 handling),
 dan deteksi Rate Limit (429) untuk auto-failover antar akun/key.
+Zero-Dependency, 100% kompatibel dengan Python 3.10 - 3.14+.
 """
 
 import json
 import time
+import urllib.request
+import urllib.error
 from typing import List, Dict, Tuple, Optional
-import requests
 
 
 class AIRateLimitError(Exception):
@@ -20,6 +23,29 @@ class AIAuthError(Exception):
     pass
 
 
+def _http_post_json(url: str, payload: dict, headers: Optional[dict] = None, timeout: int = 60) -> Tuple[int, str]:
+    """Helper HTTP POST JSON menggunakan urllib bawaan (zero external dependencies)."""
+    hdrs = {
+        "Content-Type": "application/json",
+        "User-Agent": "AntigravityOrchestrator/2.0"
+    }
+    if headers:
+        hdrs.update(headers)
+
+    data_bytes = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data_bytes, headers=hdrs, method="POST")
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            return resp.status, body
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")
+        return e.code, err_body
+    except Exception as e:
+        raise Exception(f"Network error: {e}")
+
+
 class BaseAIClient:
     def send_chat(self, history: List[Dict[str, str]], prompt: str) -> str:
         raise NotImplementedError
@@ -29,7 +55,7 @@ class BaseAIClient:
 
 
 # ────────────────────────────────────────────────────────────────
-# Google Gemini Client (Official v1beta REST)
+# Google Gemini Client (Official v1beta REST via urllib)
 # ────────────────────────────────────────────────────────────────
 class GeminiClient(BaseAIClient):
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -42,7 +68,6 @@ class GeminiClient(BaseAIClient):
 
     def __init__(self, api_key: str, model: str = "gemini-3-flash-preview"):
         self.api_key = api_key
-        # Jika model lama (misal 2.0 atau 1.5) yang sudah deprecated, map ke model aktif
         if model in ("gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-flash"):
             self.model = "gemini-3-flash-preview"
         else:
@@ -78,14 +103,14 @@ class GeminiClient(BaseAIClient):
         for m in models_to_try:
             url = f"{self.BASE_URL}/{m}:generateContent?key={self.api_key}"
             try:
-                resp = requests.post(url, json=payload, timeout=60)
+                code, body = _http_post_json(url, payload, timeout=60)
             except Exception as e:
                 raise AIAuthError(f"Koneksi gagal ke Gemini: {e}")
 
-            if resp.status_code == 200:
+            if code == 200:
                 self.model = m
-                data = resp.json()
                 try:
+                    data = json.loads(body)
                     candidates = data.get("candidates", [])
                     if candidates:
                         parts = candidates[0].get("content", {}).get("parts", [])
@@ -95,15 +120,15 @@ class GeminiClient(BaseAIClient):
                 except Exception as e:
                     raise Exception(f"Gagal parse JSON Gemini: {e}")
 
-            elif resp.status_code == 429:
+            elif code == 429:
                 raise AIRateLimitError("Gemini Quota Exceeded (429).")
-            elif resp.status_code in (401, 403):
-                raise AIAuthError(f"Gemini Auth Gagal ({resp.status_code}): {resp.text[:200]}")
-            elif resp.status_code in (404, 503):
-                last_error = f"Model {m} status {resp.status_code}"
+            elif code in (401, 403):
+                raise AIAuthError(f"Gemini Auth Gagal ({code}): {body[:200]}")
+            elif code in (404, 503):
+                last_error = f"Model {m} status {code}"
                 continue
             else:
-                last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                last_error = f"HTTP {code}: {body[:200]}"
                 break
 
         raise Exception(f"Semua model Gemini gagal: {last_error}")
@@ -114,11 +139,11 @@ class GeminiClient(BaseAIClient):
             url = f"{self.BASE_URL}/{m}:generateContent?key={self.api_key}"
             payload = {"contents": [{"role": "user", "parts": [{"text": "ping"}]}]}
             try:
-                resp = requests.post(url, json=payload, timeout=12)
-                if resp.status_code == 200:
+                code, body = _http_post_json(url, payload, timeout=12)
+                if code == 200:
                     self.model = m
                     return True, f"✅ Gemini OK ({m})"
-                elif resp.status_code == 429:
+                elif code == 429:
                     return False, "⏳ Gemini Rate Limited (429)"
             except Exception:
                 pass
@@ -126,7 +151,7 @@ class GeminiClient(BaseAIClient):
 
 
 # ────────────────────────────────────────────────────────────────
-# Groq Client (Official OpenAI-Compatible REST)
+# Groq Client (Official OpenAI-Compatible REST via urllib)
 # ────────────────────────────────────────────────────────────────
 class GroqClient(BaseAIClient):
     BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -138,7 +163,6 @@ class GroqClient(BaseAIClient):
 
     def __init__(self, api_key: str, model: str = "qwen/qwen3.8-27b"):
         self.api_key = api_key
-        # Jika model lama/tidak tersedia, fallback ke model aktif
         if not model or "llama" in model.lower():
             self.model = "qwen/qwen3.8-27b"
         else:
@@ -150,7 +174,6 @@ class GroqClient(BaseAIClient):
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
         }
 
         models_to_try = [self.model] + [m for m in self.FALLBACK_MODELS if m != self.model]
@@ -165,33 +188,32 @@ class GroqClient(BaseAIClient):
             }
 
             try:
-                resp = requests.post(self.BASE_URL, headers=headers, json=payload, timeout=90)
+                code, body = _http_post_json(self.BASE_URL, payload, headers=headers, timeout=90)
             except Exception as e:
                 raise AIAuthError(f"Gagal koneksi ke Groq: {e}")
 
-            if resp.status_code == 200:
+            if code == 200:
                 self.model = m
-                data = resp.json()
                 try:
+                    data = json.loads(body)
                     choice = data["choices"][0]
                     content = choice.get("message", {}).get("content", "")
                     if content:
                         return content
-                    # Jika model reasoning dan content kosong di limit
                     reasoning = choice.get("message", {}).get("reasoning", "")
                     return reasoning if reasoning else "[Empty response]"
                 except Exception as e:
                     raise Exception(f"Gagal parse respons Groq: {e}")
 
-            elif resp.status_code == 429:
+            elif code == 429:
                 raise AIRateLimitError("Groq Rate Limit Reached (429 TPM/RPM).")
-            elif resp.status_code in (401, 403):
-                raise AIAuthError(f"Groq Auth Error ({resp.status_code}): {resp.text[:200]}")
-            elif resp.status_code == 404:
+            elif code in (401, 403):
+                raise AIAuthError(f"Groq Auth Error ({code}): {body[:200]}")
+            elif code == 404:
                 last_error = f"Model {m} not found (404)"
                 continue
             else:
-                last_error = f"Groq HTTP {resp.status_code}: {resp.text[:200]}"
+                last_error = f"Groq HTTP {code}: {body[:200]}"
                 break
 
         raise Exception(f"Semua model Groq gagal: {last_error}")
@@ -199,7 +221,6 @@ class GroqClient(BaseAIClient):
     def test_connection(self) -> Tuple[bool, str]:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
         }
         models_to_test = [self.model] + [m for m in self.FALLBACK_MODELS if m != self.model]
         for m in models_to_test:
@@ -209,11 +230,11 @@ class GroqClient(BaseAIClient):
                 "max_tokens": 10
             }
             try:
-                resp = requests.post(self.BASE_URL, headers=headers, json=payload, timeout=12)
-                if resp.status_code == 200:
+                code, body = _http_post_json(self.BASE_URL, payload, headers=headers, timeout=12)
+                if code == 200:
                     self.model = m
                     return True, f"✅ Groq OK ({m})"
-                elif resp.status_code == 429:
+                elif code == 429:
                     return False, "⏳ Groq Rate Limited (429)"
             except Exception:
                 pass
