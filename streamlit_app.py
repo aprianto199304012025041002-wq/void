@@ -3,6 +3,14 @@ Main Streamlit App — AI Cluster Orchestrator (Gemini & Groq)
 Cyberpunk Dashboard | Multi-Key Pooling | 24/7 Auto-Looping
 """
 
+import sys
+import os
+
+# Pastikan root path masuk ke sys.path untuk Streamlit Cloud Linux
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
 import time
 import streamlit as st
 
