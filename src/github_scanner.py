@@ -1,6 +1,6 @@
 """
 GitHub Scanner — Membaca file dan repositori via GitHub REST API (Read-Only).
-Zero external dependency (urllib).
+Mendukung multi-repo detection. Zero external dependency (urllib).
 """
 
 import json
@@ -22,28 +22,50 @@ IGNORE_DIRS = {
 }
 
 
+def list_accessible_repos(token: str) -> List[dict]:
+    """Mengambil daftar semua repo yang dapat diakses oleh token PAT."""
+    if not token:
+        return []
+    url = "https://api.github.com/user/repos?per_page=50&sort=updated"
+    headers = {
+        "Accept": "application/vnd.github.v3+json",
+        "Authorization": f"token {token}",
+        "User-Agent": "Antigravity-BugHunter/2.0"
+    }
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return [
+                {
+                    "full_name": r["full_name"],
+                    "private": r.get("private", False),
+                    "default_branch": r.get("default_branch", "main"),
+                    "description": r.get("description") or ""
+                }
+                for r in data if "full_name" in r
+            ]
+    except Exception:
+        return []
+
+
 class GitHubRepoReader:
     BASE_URL = "https://api.github.com"
 
     def __init__(self, repo_full_name: str, pat_token: Optional[str] = None):
-        """
-        repo_full_name: format 'owner/repo'
-        pat_token: read-only GitHub Personal Access Token
-        """
         self.repo = repo_full_name.strip().strip("/")
         self.token = pat_token.strip() if pat_token else ""
 
     def _headers(self) -> dict:
         h = {
             "Accept": "application/vnd.github.v3+json",
-            "User-Agent": "Antigravity-BugHunter/1.0"
+            "User-Agent": "Antigravity-BugHunter/2.0"
         }
         if self.token:
             h["Authorization"] = f"token {self.token}"
         return h
 
     def test_access(self) -> Tuple[bool, str]:
-        """Uji apakah repo bisa diakses dengan token ini."""
         url = f"{self.BASE_URL}/repos/{self.repo}"
         req = urllib.request.Request(url, headers=self._headers(), method="GET")
         try:
@@ -62,11 +84,6 @@ class GitHubRepoReader:
             return False, f"❌ Error koneksi: {e}"
 
     def get_repo_files(self) -> List[dict]:
-        """
-        Mengambil semua file source code yang relevan dari repo.
-        Return: list of {'path': str, 'size': int, 'sha': str}
-        """
-        # 1. Dapatkan default branch
         url_repo = f"{self.BASE_URL}/repos/{self.repo}"
         req_repo = urllib.request.Request(url_repo, headers=self._headers(), method="GET")
         try:
@@ -76,7 +93,6 @@ class GitHubRepoReader:
         except Exception:
             branch = "main"
 
-        # 2. Ambil recursive tree
         url_tree = f"{self.BASE_URL}/repos/{self.repo}/git/trees/{branch}?recursive=1"
         req_tree = urllib.request.Request(url_tree, headers=self._headers(), method="GET")
         try:
@@ -94,16 +110,13 @@ class GitHubRepoReader:
             path = item.get("path", "")
             size = item.get("size", 0)
 
-            # Skip file terlalu besar (> 100 KB) agar context window hemat
             if size > 100_000:
                 continue
 
-            # Cek direktori yang diabaikan
             parts = path.split("/")
             if any(p in IGNORE_DIRS for p in parts[:-1]):
                 continue
 
-            # Cek ekstensi
             ext = "." + path.split(".")[-1].lower() if "." in path else ""
             if ext in CODE_EXTENSIONS:
                 code_files.append({
@@ -115,7 +128,6 @@ class GitHubRepoReader:
         return code_files
 
     def get_file_content(self, file_path: str) -> Optional[str]:
-        """Mengambil isi teks dari sebuah file."""
         url = f"{self.BASE_URL}/repos/{self.repo}/contents/{file_path}"
         req = urllib.request.Request(url, headers=self._headers(), method="GET")
         try:
