@@ -4,13 +4,24 @@ Menjalankan auto-looping 'lanjut' 24/7 di background thread.
 Otomatis failover / rotasi node saat kena limit 429.
 """
 
+import os
+import sys
 import threading
 import time
 import queue
 from typing import Optional, List, Dict
 
-from src.pool import ClusterPool, KeyNode, STATUS_COOLDOWN, STATUS_ERROR
-from src.client import get_ai_client, AIRateLimitError, AIAuthError
+# Pastikan root directory terdaftar di sys.path
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+try:
+    from src.pool import ClusterPool, KeyNode, STATUS_COOLDOWN, STATUS_ERROR
+    from src.client import get_ai_client, AIRateLimitError, AIAuthError
+except ImportError:
+    from .pool import ClusterPool, KeyNode, STATUS_COOLDOWN, STATUS_ERROR
+    from .client import get_ai_client, AIRateLimitError, AIAuthError
 
 _pool: Optional[ClusterPool] = None
 _daemon_thread: Optional[threading.Thread] = None
@@ -78,9 +89,6 @@ def clear_chat_history():
 
 
 def run_single_task(prompt: str = "lanjut", node_id: Optional[str] = None) -> dict:
-    """
-    Eksekusi 1 giliran chat dengan stateful history.
-    """
     pool = get_pool()
 
     if node_id:
@@ -111,14 +119,11 @@ def run_single_task(prompt: str = "lanjut", node_id: Optional[str] = None) -> di
         with _thread_lock:
             history_copy = list(active_chat_thread)
 
-        # Kirim ke AI engine
         response = client.send_chat(history_copy, prompt)
 
-        # Update riwayat obrolan (Stateful)
         with _thread_lock:
             active_chat_thread.append({"role": "user", "content": prompt})
             active_chat_thread.append({"role": "assistant", "content": response})
-            # Pangkas jika melebihi batas turn
             if len(active_chat_thread) > MAX_HISTORY_TURNS * 2:
                 del active_chat_thread[:2]
 
@@ -137,7 +142,7 @@ def run_single_task(prompt: str = "lanjut", node_id: Optional[str] = None) -> di
         return {"success": True, "node_id": node.id, "response": response, "error": ""}
 
     except AIRateLimitError as e:
-        node.mark_cooldown(seconds=60) # Cooldown 60s untuk rotasi RPM/TPM
+        node.mark_cooldown(seconds=60)
         _log(f"⏳ [{node.label}] Kena Rate Limit (429). Masuk cooldown 60s. Auto-failover...")
         with _stats_lock:
             stats["total_failed"] += 1
@@ -161,8 +166,8 @@ def run_single_task(prompt: str = "lanjut", node_id: Optional[str] = None) -> di
         return {"success": False, "node_id": node.id, "response": "", "error": str(e)}
 
 
-DEFAULT_INTERVAL_OK     = 60    # detik antar iterasi sukses
-DEFAULT_INTERVAL_RETRY  = 10    # detik saat gagal sebelum retry
+DEFAULT_INTERVAL_OK     = 30
+DEFAULT_INTERVAL_RETRY  = 10
 
 
 def _daemon_loop(prompt: str, interval_ok: int, interval_retry: int):
