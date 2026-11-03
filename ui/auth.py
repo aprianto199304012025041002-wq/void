@@ -22,7 +22,7 @@ def require_auth() -> bool:
 
     st.markdown("""
     <div class="auth-box">
-        <div style="font-size: 1.8rem; margin-bottom: 8px;">🔒</div>
+        <div style="font-size: 1.8rem; margin-bottom: 8px;">🔐</div>
         <div style="font-family: 'Fira Code', monospace; font-size: 0.95rem; font-weight: 700; color: #38BDF8; letter-spacing: 0.05em;">SECURE CLUSTER GATEWAY</div>
         <div style="font-size: 0.75rem; color: #64748B; margin-top: 4px; margin-bottom: 20px;">AUTHENTICATION REQUIRED TO ACCESS NODES</div>
     </div>
@@ -38,3 +38,6 @@ def require_auth() -> bool:
             else:
                 st.error("Invalid Access Key.")
     return False
+
+# Alias untuk backward compatibility
+check_auth = require_auth
