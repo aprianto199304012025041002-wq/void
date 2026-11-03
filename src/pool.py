@@ -1,6 +1,6 @@
 """
 Pool Manager — Mengelola node API Key untuk Google Gemini & Groq.
-Mendukung Single-Key maupun Multi-Key pooling dari st.secrets.
+Membaca konfigurasi secara aman dari st.secrets (Streamlit Cloud).
 """
 
 import json
@@ -20,20 +20,30 @@ STATUS_WORKING  = "working"
 STATUS_COOLDOWN = "cooldown"
 STATUS_ERROR    = "error"
 
-# Cooldown default untuk API rate-limit (60 detik untuk rotasi TPM/RPM)
 DEFAULT_COOLDOWN_SECONDS = 60
+
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config.json")
+
+
+def _read_config_file() -> dict:
+    for path in [CONFIG_PATH, "config.json"]:
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return {}
 
 
 def _load_all_secrets() -> dict:
-    """Membaca semua secret dari st.secrets atau environment variables."""
-    out = {}
+    out = _read_config_file()
     if _HAS_ST:
         try:
             for k in st.secrets:
                 out[k] = st.secrets[k]
         except Exception:
             pass
-    # Overwrite/tambah dari env vars jika ada
     for k, v in os.environ.items():
         if k not in out:
             out[k] = v
@@ -41,8 +51,6 @@ def _load_all_secrets() -> dict:
 
 
 class KeyNode:
-    """Representasi satu node / API Key dalam cluster."""
-
     def __init__(self, node_id: str, label: str, provider: str, api_key: str, model: str):
         self.id = node_id
         self.label = label
@@ -108,31 +116,24 @@ class KeyNode:
 
 
 class ClusterPool:
-    """
-    Cluster Pool Manager untuk mengelola rotasi API Key Gemini & Groq.
-    Thread-safe & Reactive.
-    """
-
     def __init__(self):
         self._lock = threading.Lock()
         self.nodes: List[KeyNode] = []
         self.current_index: int = 0
         self.active_provider: str = "gemini"
-        self.active_model: str = "gemini-2.0-flash"
+        self.active_model: str = "gemini-3-flash-preview"
         self._load_nodes()
 
     def _load_nodes(self):
         secrets = _load_all_secrets()
         
-        provider = secrets.get("MODEL_PROVIDER", "gemini").lower()
+        provider = secrets.get("MODEL_PROVIDER", secrets.get("provider", "gemini")).lower()
         self.active_provider = "groq" if "groq" in provider else "gemini"
 
         nodes: List[KeyNode] = []
 
         if self.active_provider == "groq":
-            self.active_model = secrets.get("GROQ_MODEL", "llama-3.3-70b-versatile")
-            
-            # Cek multi-key pooling GROQ_API_KEY_1..4
+            self.active_model = secrets.get("GROQ_MODEL", secrets.get("groq_model", "llama-3.3-70b-versatile"))
             multi_keys = []
             for i in range(1, 9):
                 k = secrets.get(f"GROQ_API_KEY_{i}")
@@ -143,14 +144,12 @@ class ClusterPool:
                 for nid, lbl, k in multi_keys:
                     nodes.append(KeyNode(nid, lbl, "groq", k, self.active_model))
             else:
-                # Single key fallback
                 sk = secrets.get("GROQ_API_KEY", "")
                 nodes.append(KeyNode("groq_1", "Groq Primary", "groq", sk, self.active_model))
 
         else: # Gemini
-            self.active_model = secrets.get("GEMINI_MODEL", "gemini-2.0-flash")
+            self.active_model = secrets.get("GEMINI_MODEL", secrets.get("gemini_model", "gemini-3-flash-preview"))
             
-            # Cek multi-key pooling GEMINI_API_KEY_1..4
             multi_keys = []
             for i in range(1, 9):
                 k = secrets.get(f"GEMINI_API_KEY_{i}")
@@ -161,7 +160,6 @@ class ClusterPool:
                 for nid, lbl, k in multi_keys:
                     nodes.append(KeyNode(nid, lbl, "gemini", k, self.active_model))
             else:
-                # Single key fallback
                 sk = secrets.get("GEMINI_API_KEY", "")
                 nodes.append(KeyNode("gemini_1", "Gemini Primary", "gemini", sk, self.active_model))
 
@@ -178,7 +176,6 @@ class ClusterPool:
             self._load_nodes()
 
     def get_ready_node(self) -> Optional[KeyNode]:
-        """Round-robin memilih node yang berstatus ready."""
         with self._lock:
             n = len(self.nodes)
             if n == 0:
