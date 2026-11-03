@@ -1,167 +1,212 @@
 """
-⚡ CLAUDE CLUSTER CONSOLE — ULTRA-COMPACT EDITION
-Modular Entry Point • Official Anthropic API • Stateful Loop 'Lanjut'
+Main Streamlit App — Claude Cluster Orchestrator
+Cyberpunk UI | Claude Free Web Account Pool | TAPIR 24/7
 """
 
-import streamlit as st
-import threading
 import time
-import os
-import sys
+import streamlit as st
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, BASE_DIR)
+from ui.auth import check_auth
+from ui.styles import inject_css
+from ui.components import render_telemetry_header, render_node_cards, render_terminal, render_feed
 
-from src.pool import ClusterPool
-from src.worker import GlobalWorkerState, run_single_task, run_auto_daemon
-from src.client import ClaudeWebClient
-from ui.styles import inject_styles
-from ui.auth import require_auth
-from ui.components import (
-    render_telemetry_header,
-    render_node_cards,
-    render_terminal_stream,
-    render_history_feed
+from src.worker import (
+    get_pool, get_stats, get_logs,
+    run_single_task, start_daemon, stop_daemon, daemon_is_running,
 )
+from src.client import ClaudeWebSessionClient
 
-# Page Config
+# ── Page config ────────────────────────────────────────────────
 st.set_page_config(
-    page_title="CLAUDE CONSOLE",
-    page_icon="⚡",
+    page_title="TAPIR Cluster",
+    page_icon="🤖",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-# Injeksi CSS Mobile & Desktop
-inject_styles()
+inject_css()
 
-# Gatekeeper Password Auth
-if not require_auth():
+# ── Auth gate ─────────────────────────────────────────────────
+if not check_auth():
     st.stop()
 
-# State & Pool Init
-if "global_state" not in st.session_state:
-    st.session_state.global_state = GlobalWorkerState(BASE_DIR)
+# ── Pool ──────────────────────────────────────────────────────
+pool = get_pool()
 
-GSTATE = st.session_state.global_state
-pool = ClusterPool(BASE_DIR)
-summary = pool.get_status_summary()
+# ── Telemetry header ──────────────────────────────────────────
+status = pool.get_status()
+wstats = get_stats()
+render_telemetry_header(status, wstats)
 
-# Render Top Telemetry & Micro Node Cards
-render_telemetry_header(summary, GSTATE.auto_running, GSTATE.auto_iteration)
-render_node_cards(summary)
+# ── Tabs ──────────────────────────────────────────────────────
+tab_ctrl, tab_feed, tab_vault, tab_cfg = st.tabs(
+    ["⚡ CONTROLLER", "📡 FEED", "🔑 VAULT", "⚙️ CONFIG"]
+)
 
-# Main Split-Screen Layout (Auto-stacks vertically on Mobile)
-col_ctrl, col_term = st.columns([5, 7])
+# ══════════════════════════════════════════════════════════════
+# TAB 1: CONTROLLER
+# ══════════════════════════════════════════════════════════════
+with tab_ctrl:
+    render_node_cards(status["nodes"])
 
-with col_ctrl:
-    tabs = st.tabs(["🚀 CONTROLLER", "📜 FEED (HISTORY)", "🔑 VAULT", "⚙️ CONFIG"])
-    
-    with tabs[0]:
-        st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
-        
-        # Pilihan Model & Reset Thread
-        c_mod, c_rst = st.columns([3, 1])
-        with c_mod:
-            selected_model = st.selectbox(
-                "Model",
-                options=["claude-3-5-sonnet-20241022", "claude-3-haiku-20240307"],
-                format_func=lambda x: "⚡ Sonnet 3.5 (Pintar)" if "sonnet" in x else "🪶 Haiku 3 (Hemat Saldo)",
-                label_visibility="collapsed"
-            )
-        with c_rst:
-            if st.button("🗑️ Reset Chat", help="Bersihkan memori percakapan loop", use_container_width=True):
-                with GSTATE.lock:
-                    GSTATE.active_chat_thread = []
-                st.toast("Memori chat direset!")
+    st.markdown("---")
+    col_a, col_b, col_c = st.columns([2, 1, 1])
 
-        prompt_val = st.text_input("Payload / Command", value="lanjut", label_visibility="collapsed", placeholder="Type instruction or 'lanjut'...")
-        
-        b1, b2, b3 = st.columns([3, 3, 2])
-        with b1:
-            if st.button("⚡ Run Once", type="primary", disabled=GSTATE.task_running or GSTATE.auto_running, use_container_width=True):
-                if prompt_val.strip():
-                    t = threading.Thread(target=run_single_task, args=(GSTATE, pool, prompt_val, selected_model), daemon=True)
-                    t.start()
-                    st.rerun()
-        with b2:
-            if not GSTATE.auto_running:
-                if st.button("▶ Start Loop", disabled=GSTATE.task_running, use_container_width=True):
-                    GSTATE.auto_stop_event.clear()
-                    GSTATE.auto_running = True
-                    GSTATE.auto_iteration = 0
-                    t = threading.Thread(target=run_auto_daemon, args=(GSTATE, pool, 100, prompt_val, True, selected_model), daemon=True)
-                    t.start()
-                    st.rerun()
-            else:
-                if st.button("⏹ Stop Daemon", type="secondary", use_container_width=True):
-                    GSTATE.auto_stop_event.set()
-                    GSTATE.auto_running = False
-                    st.rerun()
-        with b3:
-            if st.button("🔃 Sync", use_container_width=True):
+    with col_a:
+        prompt_text = st.text_input(
+            "Prompt", value="lanjut", key="prompt_input",
+            help="Teks yang dikirim ke TAPIR conversation"
+        )
+
+    with col_b:
+        interval = st.number_input(
+            "Interval (detik)", min_value=30, max_value=3600,
+            value=90, step=10, key="interval_input"
+        )
+
+    with col_c:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if daemon_is_running():
+            if st.button("⏹ STOP DAEMON", type="secondary", use_container_width=True):
+                stop_daemon()
+                st.rerun()
+        else:
+            if st.button("▶ START DAEMON", type="primary", use_container_width=True):
+                start_daemon(prompt=prompt_text, interval_ok=interval)
                 st.rerun()
 
-        if GSTATE.auto_running and GSTATE.sleeping_until_str:
-            st.info(f"🛌 **Cluster Sleeping**: Resuming automatically at **{GSTATE.sleeping_until_str}**")
+    st.markdown("---")
+    col_send, col_status = st.columns([1, 2])
+    with col_send:
+        if st.button("📤 Kirim Sekali", use_container_width=True):
+            with st.spinner("Mengirim..."):
+                result = run_single_task(prompt=prompt_text)
+            if result["success"]:
+                st.success(f"✅ [{result['node_id']}] Berhasil")
+                st.text_area("Respon", value=result["response"], height=200, key="one_resp")
+            else:
+                st.error(f"❌ {result['error']}")
 
-        if GSTATE.task_result:
-            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-            with st.expander(f"📄 Latest Response ({GSTATE.task_account})", expanded=True):
-                st.markdown(GSTATE.task_result)
+    with col_status:
+        daemon_badge = "🟢 AKTIF" if daemon_is_running() else "🔴 IDLE"
+        st.metric("Daemon Status", daemon_badge)
+        st.metric("Total Terkirim", wstats.get("total_sent", 0))
+        st.metric("Sukses / Gagal",
+                  f"{wstats.get('total_success', 0)} / {wstats.get('total_failed', 0)}")
 
-    with tabs[1]:
-        render_history_feed(GSTATE.invocations)
+# ══════════════════════════════════════════════════════════════
+# TAB 2: FEED
+# ══════════════════════════════════════════════════════════════
+with tab_feed:
+    logs = get_logs(max_lines=150)
+    render_terminal(logs)
+    render_feed(status["nodes"])
 
-    with tabs[2]:
-        st.caption("Official Anthropic API Keys (console.anthropic.com)")
-        v_updated = False
-        for acc in pool.config.get("accounts", []):
-            st.markdown(f"**Key #{acc['id']} [{acc['name']}]**")
-            current_k = acc.get("api_key") or acc.get("session_key", "")
-            c_k, c_p = st.columns([3, 1])
-            with c_k:
-                n_key = st.text_input(f"Key K0{acc['id']}", value=current_k, type="password", key=f"k_{acc['id']}", label_visibility="collapsed", placeholder="sk-ant-api03-...")
-            with c_p:
-                if st.button("🔍 Ping", key=f"p_{acc['id']}", use_container_width=True):
-                    key_to_test = n_key.strip() if n_key.strip() else current_k
-                    if key_to_test:
-                        test_cli = ClaudeWebClient(key_to_test)
-                        ok, msg = test_cli.test_connection()
+    if st.button("🔄 Refresh Feed"):
+        st.rerun()
+
+# ══════════════════════════════════════════════════════════════
+# TAB 3: VAULT — Session Keys
+# ══════════════════════════════════════════════════════════════
+with tab_vault:
+    st.markdown("### 🔑 Session Key & Koneksi")
+    st.info(
+        "Masukkan `sessionKey` cookie dari claude.ai untuk masing-masing akun. "
+        "Format: `sk-ant-sid01-...`\n\n"
+        "**Cara ambil:** Claude.ai → F12 → Application → Cookies → `sessionKey`",
+        icon="ℹ️"
+    )
+
+    nodes = status["nodes"]
+    for i, node in enumerate(nodes, start=1):
+        with st.expander(f"🤖 {node['label']} (Akun {i})", expanded=(i == 1)):
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                key_val = st.text_input(
+                    f"Session Key #{i}",
+                    value=node.get("session_key", ""),
+                    type="password",
+                    placeholder="sk-ant-sid01-...",
+                    key=f"sk_input_{i}",
+                )
+                conv_val = st.text_input(
+                    f"TAPIR Conv ID #{i}",
+                    value=node.get("tapir_conv_id", ""),
+                    placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+                    key=f"conv_input_{i}",
+                )
+            with col2:
+                st.markdown("<br><br>", unsafe_allow_html=True)
+                if st.button(f"🔌 Ping #{i}", key=f"ping_{i}"):
+                    if key_val:
+                        with st.spinner("Testing..."):
+                            client = ClaudeWebSessionClient(
+                                session_key=key_val,
+                                conv_id=conv_val or "test",
+                            )
+                            ok, msg = client.test_connection()
                         if ok:
-                            st.success(f"✔ {msg}")
+                            st.success(msg)
                         else:
-                            st.error(f"✖ {msg}")
+                            st.error(msg)
                     else:
-                        st.warning("Key kosong")
+                        st.warning("Session key kosong")
 
-            if n_key != current_k:
-                acc["api_key"] = n_key.strip()
-                v_updated = True
+                status_badge = {
+                    "ready":    "🟢 Ready",
+                    "working":  "🔵 Working",
+                    "cooldown": f"⏳ CD {node.get('cooldown_remaining', 0)}s",
+                    "error":    "🔴 Error",
+                }.get(node.get("status", "error"), "❓")
+                st.markdown(f"**Status:** {status_badge}")
 
-        if v_updated or st.button("Save Keys", type="primary", use_container_width=True):
-            pool.save_config()
-            st.success("Keys saved!")
-            st.rerun()
+    st.markdown("---")
+    st.markdown("#### 📋 Format Streamlit Secrets")
+    st.markdown("Salin format ini ke **Streamlit Cloud → Settings → Secrets**:")
+    st.code(
+        """pw = "zxcvbnm3142"
+MODEL_PROVIDER = "claude_web"
 
-    with tabs[3]:
-        cd_h = st.number_input("Cooldown Duration on Limit (Hours)", 0.5, 6.0, float(pool.config.get("cooldown_hours", 1.0)), 0.5)
-        if st.button("Save Config", use_container_width=True):
-            pool.config["cooldown_hours"] = cd_h
-            pool.save_config()
-            st.success("Saved")
-        if st.button("Reset Rate-Limit Lockouts", use_container_width=True):
-            for acc in pool.state["accounts"].values():
-                acc["status"] = "ready"
-                acc["available_at"] = 0
-            pool.save_state()
-            st.success("Reset OK")
-            st.rerun()
+SESSION_KEY_1 = "sk-ant-sid01-XXXX"
+SESSION_KEY_2 = "sk-ant-sid01-XXXX"
+SESSION_KEY_3 = "sk-ant-sid01-XXXX"
+SESSION_KEY_4 = "sk-ant-sid01-XXXX"
 
-with col_term:
-    render_terminal_stream(GSTATE.task_logs, is_active=(GSTATE.auto_running or GSTATE.task_running))
+TAPIR_CONV_1 = "f51cbb3c-8d7e-455e-8598-236271016a47"
+TAPIR_CONV_2 = "930c7ed1-62a8-475d-9a87-f22df858cde2"
+TAPIR_CONV_3 = "03c28d45-23fe-4a5c-a08c-58d5511c268a"
+TAPIR_CONV_4 = "f898f5a0-427c-4c3e-bad6-0c2955b986b5"
+""",
+        language="toml",
+    )
 
-# Realtime polling
-if GSTATE.auto_running or GSTATE.task_running:
-    time.sleep(3)
+# ══════════════════════════════════════════════════════════════
+# TAB 4: CONFIG
+# ══════════════════════════════════════════════════════════════
+with tab_cfg:
+    st.markdown("### ⚙️ Konfigurasi")
+
+    st.markdown("**Provider aktif:**")
+    provider = pool.model_provider
+    st.success(f"🤖 `{provider}` — Claude Free Web (curl_cffi Chrome impersonation)")
+
+    st.markdown("---")
+    st.markdown("**Node Summary:**")
+    for node in status["nodes"]:
+        conv_short = node.get("tapir_conv_id", "")[:8] + "..." if node.get("tapir_conv_id") else "—"
+        has_key = "✅" if node.get("session_key") else "❌"
+        st.markdown(
+            f"- **{node['label']}** | Key: {has_key} | Conv: `{conv_short}` | "
+            f"Sent: {node.get('total_sent', 0)}"
+        )
+
+    st.markdown("---")
+    if st.button("🔄 Reload Config dari Secrets"):
+        pool.reload()
+        st.success("Config direload!")
+        st.rerun()
+
+# ── Auto-refresh saat daemon aktif ───────────────────────────
+if daemon_is_running():
+    time.sleep(5)
     st.rerun()
