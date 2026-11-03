@@ -1,9 +1,10 @@
 """
 Continuous Bug Hunter & Code Auditor Worker.
-Fitur:
-- Smart Bug Deduplication (mencegah pencatatan bug yang sama berulang kali)
-- Persistent Disk Storage (tersimpan otomatis ke file bug_report.md di server)
-- Multi-Cycle Continuous Looping dengan pembaruan otomatis
+Fitur Unggulan:
+- Persistent Disk Storage & Auto-Restore saat Reboot
+- Auto-Sync ke GitHub Branch 'audit-reports' (Anti-Hilang Selamanya)
+- Smart Bug Deduplication (Zero Spam Duplikat)
+- Continuous Looping 24/7 di Cloud
 """
 
 import os
@@ -20,13 +21,15 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 try:
-    from src.pool import ClusterPool
+    from src.pool import ClusterPool, load_all_secrets
     from src.client import get_ai_client, AIRateLimitError, AIAuthError
     from src.github_scanner import GitHubRepoReader
+    from src.github_sync import GitHubReportSyncer
 except ImportError:
-    from .pool import ClusterPool
+    from .pool import ClusterPool, load_all_secrets
     from .client import get_ai_client, AIRateLimitError, AIAuthError
     from .github_scanner import GitHubRepoReader
+    from .github_sync import GitHubReportSyncer
 
 REPORT_FILE_PATH = os.path.join(_ROOT, "bug_report.md")
 HASHES_FILE_PATH = os.path.join(_ROOT, "known_bug_hashes.json")
@@ -53,8 +56,14 @@ stats = {
     "target_repo": "",
     "last_bug_title": "",
     "duplicates_prevented": 0,
+    "last_github_sync": "Never",
 }
 _stats_lock = threading.Lock()
+
+
+def _get_write_token() -> str:
+    sec = load_all_secrets()
+    return sec.get("GITHUB_WRITE_PAT", sec.get("TARGET_GITHUB_PAT", sec.get("GITHUB_PAT", "")))
 
 
 def _log(msg: str):
@@ -83,36 +92,77 @@ def get_pool() -> ClusterPool:
 
 
 # ────────────────────────────────────────────────────────────────
-# Persistence (Muat & Simpan ke Disk Lokal Server)
+# Persistence & Cloud Auto-Restore (Anti-Hilang saat Reboot)
 # ────────────────────────────────────────────────────────────────
-def _load_persisted_data():
-    """Memuat data bug dan hash yang tersimpan di disk agar riwayat tidak hilang saat reload."""
+def _parse_raw_markdown_to_items(raw_content: str):
     global bug_reports_markdown, seen_bug_hashes
-    with _report_lock:
-        if os.path.exists(HASHES_FILE_PATH):
-            try:
-                with open(HASHES_FILE_PATH, "r", encoding="utf-8") as f:
-                    seen_bug_hashes = set(json.load(f))
-            except Exception:
-                seen_bug_hashes = set()
+    if not raw_content:
+        return
+    parts = raw_content.split("\n\n---\n\n")
+    items = [p.strip() for p in parts if p.strip().startswith("### 🐛")]
+    bug_reports_markdown = items
+    stats["total_bugs_found"] = len(items)
 
+    for item in items:
+        lines = [line.strip().lower() for line in item.split("\n") if line.strip()]
+        heading = lines[0] if lines else ""
+        file_line = next((l for l in lines if l.startswith("- **file:**")), "")
+        sig = f"{file_line}::{heading}"
+        fp = hashlib.sha256(sig.encode("utf-8")).hexdigest()[:16]
+        seen_bug_hashes.add(fp)
+
+
+def _load_persisted_data():
+    """Memuat dari disk lokal atau fetch otomatis dari GitHub jika baru saja di-reboot."""
+    global bug_reports_markdown, seen_bug_hashes
+    loaded_local = False
+    with _report_lock:
         if os.path.exists(REPORT_FILE_PATH):
             try:
                 with open(REPORT_FILE_PATH, "r", encoding="utf-8") as f:
-                    raw_content = f.read()
-                    if raw_content:
-                        # Pisahkan item berdasarkan delimiter
-                        parts = raw_content.split("\n\n---\n\n")
-                        # Abaikan header jika ada
-                        items = [p.strip() for p in parts if p.strip().startswith("### 🐛")]
-                        bug_reports_markdown = items
-                        stats["total_bugs_found"] = len(items)
+                    content = f.read()
+                    if content and "### 🐛" in content:
+                        _parse_raw_markdown_to_items(content)
+                        loaded_local = True
             except Exception:
                 pass
 
+        if not loaded_local:
+            token = _get_write_token()
+            if token:
+                try:
+                    syncer = GitHubReportSyncer(token)
+                    cloud_content = syncer.fetch_latest_report()
+                    if cloud_content and "### 🐛" in cloud_content:
+                        _parse_raw_markdown_to_items(cloud_content)
+                        with open(REPORT_FILE_PATH, "w", encoding="utf-8") as f:
+                            f.write(cloud_content)
+                        _log(f"☁️ [Auto-Restore] Berhasil memulihkan {len(bug_reports_markdown)} bug dari GitHub branch 'audit-reports'!")
+                except Exception as e:
+                    _log(f"⚠️ Gagal auto-restore dari GitHub: {e}")
+
+
+def _async_sync_to_github(full_md: str):
+    """Jalankan push ke GitHub branch 'audit-reports' di background thread."""
+    def _worker():
+        token = _get_write_token()
+        if not token:
+            return
+        syncer = GitHubReportSyncer(token)
+        ok, msg = syncer.push_report(full_md, commit_msg=f"🛡️ Auto-sync bug report ({stats.get('total_bugs_found', 0)} bugs) [skip ci]")
+        if ok:
+            ts = time.strftime("%H:%M:%S")
+            with _stats_lock:
+                stats["last_github_sync"] = ts
+            _log(f"☁️ [Auto-Sync GitHub] Laporan berhasil disimpan permanen ke branch 'audit-reports' ({ts}).")
+        else:
+            _log(f"⚠️ [Sync GitHub Warning] {msg}")
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+
 
 def _save_persisted_data():
-    """Menyimpan seluruh laporan bug dan daftar hash ke disk server."""
     with _report_lock:
         try:
             with open(HASHES_FILE_PATH, "w", encoding="utf-8") as f:
@@ -121,8 +171,10 @@ def _save_persisted_data():
             full_md = _build_markdown_document()
             with open(REPORT_FILE_PATH, "w", encoding="utf-8") as f:
                 f.write(full_md)
+
+            _async_sync_to_github(full_md)
         except Exception as e:
-            _log(f"⚠️ Gagal menyimpan ke disk: {e}")
+            _log(f"⚠️ Gagal menyimpan data: {e}")
 
 
 def _build_markdown_document() -> str:
@@ -131,11 +183,11 @@ def _build_markdown_document() -> str:
     header += f"- **Target Repository:** `{target}`\n"
     header += f"- **Total Bug Unik Ditemukan:** `{len(bug_reports_markdown)}`\n"
     header += f"- **Duplikat Dicegah:** `{stats.get('duplicates_prevented', 0)}`\n"
-    header += f"- **Status:** `Continuous Automated Looping`\n\n---\n\n"
+    header += f"- **Status:** `Continuous Automated Looping`\n"
+    header += f"- **GitHub Auto-Sync:** `Active (branch: audit-reports)`\n\n---\n\n"
     return header + "\n\n---\n\n".join(bug_reports_markdown)
 
 
-# Muat data persisten saat modul pertama kali diimpor
 _load_persisted_data()
 
 
@@ -170,12 +222,8 @@ def clear_bug_reports():
 # Smart Fingerprinting & Deduplication
 # ────────────────────────────────────────────────────────────────
 def _compute_bug_fingerprint(file_path: str, response_text: str) -> str:
-    """
-    Menghitung sidik jari unik bug berdasarkan file dan baris pertama judul bug.
-    """
     lines = [line.strip().lower() for line in response_text.split("\n") if line.strip()]
     first_heading = lines[0] if lines else "unknown_issue"
-    # Normalisasi teks judul
     clean_title = "".join(c for c in first_heading if c.isalnum() or c in " _-")
     sig = f"{file_path}::{clean_title}"
     return hashlib.sha256(sig.encode("utf-8")).hexdigest()[:16]
@@ -234,18 +282,15 @@ ATURAN RESPON:
             _log(f"✅ Clean: {file_path} (Tidak ada bug)")
             return {"success": True, "has_bug": False, "file": file_path}
         else:
-            # Hitung fingerprint bug untuk deduplikasi
             fp = _compute_bug_fingerprint(file_path, response)
 
             with _report_lock:
                 if fp in seen_bug_hashes:
-                    # Bug yang sama sudah pernah dicatat!
                     _log(f"ℹ️ [Deduplikasi] Bug di {file_path} sudah ada di log. Dilewati agar tidak duplikat.")
                     with _stats_lock:
                         stats["duplicates_prevented"] += 1
                     return {"success": True, "has_bug": True, "is_duplicate": True, "file": file_path}
 
-                # Bug baru! Catat dan simpan
                 seen_bug_hashes.add(fp)
                 bug_reports_markdown.append(response)
 
