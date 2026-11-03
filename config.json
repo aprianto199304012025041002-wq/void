@@ -1,5 +1,5 @@
 {
-  "provider": "gemini",
-  "gemini_model": "gemini-3-flash-preview",
-  "groq_model": "llama-3.3-70b-versatile"
+  "provider": "groq",
+  "groq_model": "qwen/qwen3.8-27b",
+  "gemini_model": "gemini-3-flash-preview"
 }
